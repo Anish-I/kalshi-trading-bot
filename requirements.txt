@@ -1,0 +1,15 @@
+websockets>=12.0
+httpx>=0.28.0
+cryptography>=42.0
+pydantic-settings>=2.0
+python-dotenv>=1.0
+pyarrow>=15.0
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.4
+xgboost>=2.0
+torch>=2.0
+rich>=13.0
+ta>=0.11
+ccxt>=4.0
+shap>=0.45

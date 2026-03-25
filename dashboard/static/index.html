@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kalshi Trading Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0d1117; color: #c9d1d9; font-family: 'Consolas', 'Courier New', monospace; font-size: 14px; padding: 20px; }
+  h1 { color: #58a6ff; font-size: 20px; margin-bottom: 4px; }
+  .subtitle { color: #8b949e; font-size: 12px; margin-bottom: 20px; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+  .card-label { color: #8b949e; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+  .card-value { font-size: 24px; font-weight: bold; margin-top: 4px; }
+  .green { color: #3fb950; }
+  .red { color: #f85149; }
+  .blue { color: #58a6ff; }
+  .yellow { color: #d29922; }
+
+  .section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .section-title { color: #58a6ff; font-size: 14px; font-weight: bold; margin-bottom: 12px; border-bottom: 1px solid #30363d; padding-bottom: 8px; }
+
+  .bot-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #21262d; }
+  .bot-row:last-child { border-bottom: none; }
+  .bot-info { display: flex; align-items: center; gap: 10px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot.on { background: #3fb950; }
+  .dot.off { background: #f85149; }
+  .bot-name { font-weight: bold; }
+  .bot-meta { color: #8b949e; font-size: 12px; }
+  .bot-actions { display: flex; gap: 6px; }
+  .btn { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px; }
+  .btn:hover { background: #30363d; }
+  .btn.start { border-color: #3fb950; color: #3fb950; }
+  .btn.stop { border-color: #f85149; color: #f85149; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: #8b949e; font-weight: normal; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; padding: 6px 8px; border-bottom: 1px solid #30363d; }
+  td { padding: 6px 8px; border-bottom: 1px solid #21262d; }
+  tr:hover { background: #1c2128; }
+
+  .win { color: #3fb950; }
+  .loss { color: #f85149; }
+  .updated { color: #8b949e; font-size: 11px; text-align: right; margin-top: 12px; }
+</style>
+</head>
+<body>
+
+<h1>Kalshi Trading Dashboard</h1>
+<div class="subtitle">Auto-refreshes every 10s</div>
+
+<div class="cards">
+  <div class="card">
+    <div class="card-label">Balance</div>
+    <div class="card-value blue" id="balance">$--</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Total P&L</div>
+    <div class="card-value" id="total-pnl">--</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Total Trades</div>
+    <div class="card-value" id="total-trades">--</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Win Rate</div>
+    <div class="card-value" id="win-rate">--</div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">Bots</div>
+  <div id="bots-list">Loading...</div>
+</div>
+
+<div class="section">
+  <div class="section-title">Open Positions</div>
+  <table>
+    <thead><tr><th>Ticker</th><th>Side</th><th>Ct</th><th>Exposure</th><th>P&L</th><th>Updated</th></tr></thead>
+    <tbody id="positions-body"><tr><td colspan="6">Loading...</td></tr></tbody>
+  </table>
+</div>
+
+<div class="section">
+  <div class="section-title">Recent Trades</div>
+  <table>
+    <thead><tr><th>Ticker</th><th>Side</th><th>Ct</th><th>Result</th><th>P&L</th><th>Time</th></tr></thead>
+    <tbody id="trades-body"><tr><td colspan="6">Loading...</td></tr></tbody>
+  </table>
+</div>
+
+<div class="updated" id="last-updated"></div>
+
+<script>
+function fmt(cents) {
+  const d = cents / 100;
+  return d >= 0 ? `+$${d.toFixed(2)}` : `-$${Math.abs(d).toFixed(2)}`;
+}
+
+function fmtTime(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit', hour12:true });
+  } catch(e) { return iso.slice(0,16); }
+}
+
+function fmtUptime(s) {
+  if (!s) return '';
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+async function botAction(name, action) {
+  try {
+    await fetch(`/api/bots/${name}/${action}`, { method: 'POST' });
+    setTimeout(refresh, 1000);
+  } catch(e) { console.error(e); }
+}
+
+async function refresh() {
+  try {
+    const [statusRes, tradesRes] = await Promise.all([
+      fetch('/api/status').then(r => r.json()),
+      fetch('/api/trades').then(r => r.json()),
+    ]);
+
+    // Balance
+    document.getElementById('balance').textContent = `$${statusRes.balance.toFixed(2)}`;
+
+    // Trades summary
+    const s = tradesRes.summary;
+    const pnlEl = document.getElementById('total-pnl');
+    pnlEl.textContent = fmt(s.total_pnl_cents);
+    pnlEl.className = `card-value ${s.total_pnl_cents >= 0 ? 'green' : 'red'}`;
+
+    document.getElementById('total-trades').textContent = s.total_trades;
+
+    const wrEl = document.getElementById('win-rate');
+    wrEl.textContent = `${s.win_rate.toFixed(0)}%`;
+    wrEl.className = `card-value ${s.win_rate >= 50 ? 'green' : s.win_rate >= 40 ? 'yellow' : 'red'}`;
+
+    // Bots
+    const botsHtml = Object.entries(statusRes.bots).map(([name, b]) => `
+      <div class="bot-row">
+        <div class="bot-info">
+          <span class="dot ${b.running ? 'on' : 'off'}"></span>
+          <span class="bot-name">${b.label}</span>
+          <span class="bot-meta">${b.running ? `PID ${b.pid} | ${fmtUptime(b.uptime_s)}` : 'Stopped'}</span>
+        </div>
+        <div class="bot-actions">
+          ${b.running
+            ? `<button class="btn stop" onclick="botAction('${name}','stop')">Stop</button>
+               <button class="btn" onclick="botAction('${name}','restart')">Restart</button>`
+            : `<button class="btn start" onclick="botAction('${name}','start')">Start</button>`
+          }
+        </div>
+      </div>
+    `).join('');
+    document.getElementById('bots-list').innerHTML = botsHtml;
+
+    // Positions
+    const posHtml = statusRes.positions.length
+      ? statusRes.positions.map(p => `
+          <tr>
+            <td>${p.ticker}</td>
+            <td>${p.side}</td>
+            <td>${p.count}</td>
+            <td>$${p.exposure.toFixed(2)}</td>
+            <td class="${p.realized_pnl >= 0 ? 'win' : 'loss'}">${p.realized_pnl >= 0 ? '+' : ''}$${p.realized_pnl.toFixed(2)}</td>
+            <td style="color:#8b949e;font-size:12px">${fmtTime(p.updated)}</td>
+          </tr>
+        `).join('')
+      : '<tr><td colspan="6" style="color:#8b949e">No open positions</td></tr>';
+    document.getElementById('positions-body').innerHTML = posHtml;
+
+    // Recent trades
+    const trHtml = tradesRes.trades.length
+      ? tradesRes.trades.map(t => `
+          <tr>
+            <td>${t.ticker}</td>
+            <td>${t.side}</td>
+            <td>${t.count}</td>
+            <td class="${t.won ? 'win' : 'loss'}">${t.won ? 'WIN' : 'LOSS'}</td>
+            <td class="${t.pnl_cents >= 0 ? 'win' : 'loss'}">${fmt(t.pnl_cents)}</td>
+            <td style="color:#8b949e;font-size:12px">${fmtTime(t.settled_time)}</td>
+          </tr>
+        `).join('')
+      : '<tr><td colspan="6" style="color:#8b949e">No trades yet</td></tr>';
+    document.getElementById('trades-body').innerHTML = trHtml;
+
+    document.getElementById('last-updated').textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
+  } catch(e) {
+    console.error('Refresh failed:', e);
+  }
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>
