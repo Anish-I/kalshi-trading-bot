@@ -65,45 +65,45 @@ class MomentumModel:
     def score(self, features: dict) -> tuple[str, float]:
         signals = 0
 
-        # 5-min return (optimized: wider threshold)
+        # 5-min return (calibrated to p75 of actual BTC data)
         m5 = features.get("momentum_5m", 0) or 0
-        if m5 > 0.002:
+        if m5 > 0.0007:
             signals += 1
-        elif m5 < -0.002:
+        elif m5 < -0.0007:
             signals -= 1
 
-        # 10-min return (optimized: wider)
+        # 10-min return
         m10 = features.get("momentum_10m", 0) or 0
-        if m10 > 0.003:
+        if m10 > 0.0012:
             signals += 1
-        elif m10 < -0.003:
+        elif m10 < -0.0012:
             signals -= 1
 
         # Price vs VWAP
         vwap_dev = features.get("vwap_deviation", 0) or 0
-        if vwap_dev > 0.001:
+        if vwap_dev > 0.002:
             signals += 1
-        elif vwap_dev < -0.001:
+        elif vwap_dev < -0.002:
             signals -= 1
 
-        # Donchian position (optimized: need more extreme)
+        # Donchian position (>0.75 = near high, <0.25 = near low)
         donch = features.get("donchian_position", 0.5) or 0.5
-        if donch > 0.8:
+        if donch > 0.75:
             signals += 1
-        elif donch < 0.2:
+        elif donch < 0.25:
             signals -= 1
 
         # EMA 9 slope
         ema_s = features.get("ema_9_slope", 0) or 0
-        if ema_s > 0.0001:
+        if ema_s > 0.00012:
             signals += 1
-        elif ema_s < -0.0001:
+        elif ema_s < -0.00012:
             signals -= 1
 
-        # Need 4/5 signals for higher selectivity (was 3/5)
-        if signals >= 4:
+        # Need 3/5 signals (was 4/5 which was too strict)
+        if signals >= 3:
             return "up", min(0.80, 0.55 + signals * 0.05)
-        if signals <= -4:
+        if signals <= -3:
             return "down", min(0.80, 0.55 + abs(signals) * 0.05)
         return "flat", 0.50
 
