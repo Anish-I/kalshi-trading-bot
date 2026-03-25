@@ -217,21 +217,38 @@ async function refresh() {
       if (cr.prediction) {
         const arrow = cr.prediction === 'UP' ? '&#9650;' : cr.prediction === 'DOWN' ? '&#9660;' : '&#9644;';
         const color = cr.prediction === 'UP' ? '#3fb950' : cr.prediction === 'DOWN' ? '#f85149' : '#8b949e';
-        const actionColor = cr.action === 'trading' ? '#3fb950' : cr.action === 'monitoring' ? '#d29922' : '#8b949e';
+        const actionColor = cr.action === 'trading' ? '#3fb950' : cr.action === 'no_consensus' ? '#d29922' : cr.action === 'monitoring' ? '#8b949e' : '#484f58';
 
-        const confBar = `<div style="background:#21262d;border-radius:4px;height:8px;margin:6px 0;position:relative;">` +
+        // Per-model votes
+        let modelsHtml = '';
+        if (cr.models) {
+          const modelOrder = ['xgboost', 'momentum', 'mean_reversion', 'kalshi_consensus'];
+          const modelLabels = {xgboost:'XGB', momentum:'MOM', mean_reversion:'MR', kalshi_consensus:'KAL'};
+          modelsHtml = '<div style="display:flex;gap:8px;margin:6px 0;">' +
+            modelOrder.map(m => {
+              const v = cr.models[m] || {};
+              const vc = v.vote === 'UP' ? '#3fb950' : v.vote === 'DOWN' ? '#f85149' : '#484f58';
+              const va = v.vote === 'UP' ? '&#9650;' : v.vote === 'DOWN' ? '&#9660;' : '-';
+              return `<div style="background:#21262d;padding:4px 8px;border-radius:4px;border:1px solid ${vc};font-size:11px;text-align:center;">
+                <div style="color:#8b949e;">${modelLabels[m]}</div>
+                <div style="color:${vc};font-size:14px;">${va}</div>
+                <div style="color:${vc};font-size:10px;">${v.confidence || 0}%</div>
+              </div>`;
+            }).join('') + '</div>';
+        }
+
+        const confBar = `<div style="background:#21262d;border-radius:4px;height:8px;margin:4px 0;position:relative;">` +
           `<div style="background:${color};height:100%;border-radius:4px;width:${cr.confidence}%;"></div></div>`;
 
         document.getElementById('crypto-thinking').innerHTML = `
-          <div style="font-size:20px;color:${color};margin-bottom:4px;">${arrow} ${cr.prediction} <span style="font-size:14px;">${cr.confidence}%</span></div>
+          <div style="font-size:20px;color:${color};margin-bottom:2px;">${arrow} ${cr.prediction} <span style="font-size:14px;">${cr.agreement || 0}/4 agree | ${cr.confidence}%</span></div>
+          ${modelsHtml}
           ${confBar}
           <div style="color:#8b949e;font-size:12px;">
-            Down ${cr.p_down}% | Flat ${cr.p_flat}% | Up ${cr.p_up}%<br>
-            BTC: $${cr.btc_price ? cr.btc_price.toLocaleString() : '?'}<br>
-            Market: ${cr.ticker || '?'} (${cr.remaining_s}s left)<br>
-            YES ${(cr.yes_ask*100).toFixed(0)}c / NO ${(cr.no_ask*100).toFixed(0)}c<br>
-            Edge: ${cr.edge}% | <span style="color:${actionColor}">${cr.action}</span><br>
-            Today: ${cr.trades_today} trades | W${cr.wins}/L${cr.losses} | $${(cr.daily_pnl_cents/100).toFixed(2)}
+            BTC: $${cr.btc_price ? cr.btc_price.toLocaleString() : '?'} | ${cr.ticker || '?'} (${cr.remaining_s}s)<br>
+            YES ${(cr.yes_ask*100).toFixed(0)}c / NO ${(cr.no_ask*100).toFixed(0)}c | Edge: ${cr.edge}%<br>
+            <span style="color:${actionColor}">${cr.action}</span> |
+            W${cr.wins}/L${cr.losses} | $${(cr.daily_pnl_cents/100).toFixed(2)}
           </div>
           <div style="color:#484f58;font-size:11px;margin-top:4px;">${fmtTime(cr.time)}</div>
         `;
