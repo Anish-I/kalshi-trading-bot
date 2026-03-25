@@ -49,11 +49,15 @@ class XGBoostModel:
         proba = self.booster.predict(dmat)[0]
         p_down, p_flat, p_up = float(proba[0]), float(proba[1]), float(proba[2])
 
+        # Cap confidence to 0.80 — XGBoost is not calibrated enough
+        # for 99% confidence. This prevents it from bulldozing other models.
+        MAX_CONF = 0.80
+
         if p_up > p_down and p_up > p_flat:
-            return "up", p_up
+            return "up", min(p_up, MAX_CONF)
         elif p_down > p_up and p_down > p_flat:
-            return "down", p_down
-        return "flat", p_flat
+            return "down", min(p_down, MAX_CONF)
+        return "flat", min(p_flat, MAX_CONF)
 
 
 class MomentumModel:
