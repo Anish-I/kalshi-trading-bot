@@ -41,7 +41,17 @@ CONFIDENCE_THRESHOLD = 0.58
 MAX_ENTRY_PRICE = 0.62
 SCAN_INTERVAL = 30
 DAILY_LOSS_LIMIT_CENTS = 500
-MODEL_PATH = "D:/kalshi-models/xgb_balanced_20260325_210315.json"
+def get_latest_model_path():
+    latest = Path("D:/kalshi-models/latest_model.json")
+    if latest.exists():
+        return str(latest)
+    # Fallback: find most recent xgb_balanced file
+    models = sorted(Path("D:/kalshi-models").glob("xgb_balanced_*.json"))
+    if models:
+        return str(models[-1])
+    return "D:/kalshi-models/xgb_balanced_20260325_210315.json"
+
+MODEL_PATH = get_latest_model_path()
 STATE_FILE = Path(settings.DATA_DIR) / "ml_trader_state.json"
 
 traded_tickers: set = set()
@@ -50,6 +60,27 @@ daily_pnl = 0
 trade_count = 0
 win_count = 0
 loss_count = 0
+
+# Price velocity tracking
+price_history: dict[str, list[tuple[float, float]]] = {}  # ticker -> [(timestamp, yes_mid)]
+
+
+def get_price_velocity(ticker: str, current_mid: float) -> float:
+    """Track price movement speed. Returns cents/min (positive = price rising)."""
+    now = time.time()
+    if ticker not in price_history:
+        price_history[ticker] = []
+    price_history[ticker].append((now, current_mid))
+    # Keep only last 20 entries
+    price_history[ticker] = price_history[ticker][-20:]
+    entries = price_history[ticker]
+    if len(entries) >= 5:
+        oldest_t, oldest_p = entries[0]
+        latest_t, latest_p = entries[-1]
+        elapsed_min = (latest_t - oldest_t) / 60.0
+        if elapsed_min >= 2.0:
+            return (latest_p - oldest_p) / elapsed_min
+    return 0.0
 
 
 def load_model():
@@ -204,6 +235,7 @@ def main():
             # --- Market price momentum (compare to 50/50 baseline) ---
             market_mid = (yes_bid + yes_ask) / 2 if yes_ask > 0 else 0.5
             market_lean = "up" if market_mid > 0.55 else "down" if market_mid < 0.45 else "neutral"
+            velocity = get_price_velocity(ticker, market_mid)
 
             # --- Load ML features + predict ---
             features_df = load_latest_features()
@@ -219,6 +251,14 @@ def main():
                 combined_confidence = min(0.99, confidence + 0.05)  # agreement bonus
             elif (direction == "up" and kalshi_signal < 0) or (direction == "down" and kalshi_signal > 0):
                 combined_confidence = max(0.40, confidence - 0.10)  # disagreement penalty
+
+            # Price velocity adjustment
+            if velocity > 0.05 and direction == "up":
+                combined_confidence = min(0.99, combined_confidence + 0.03)
+            elif velocity < -0.05 and direction == "down":
+                combined_confidence = min(0.99, combined_confidence + 0.03)
+            elif (velocity > 0.10 and direction == "down") or (velocity < -0.10 and direction == "up"):
+                combined_confidence = max(0.40, combined_confidence - 0.05)
 
             # Determine action
             action = "monitoring"
@@ -265,6 +305,7 @@ def main():
                 "edge": round(edge * 100, 1) if side else 0,
                 "kalshi_imbalance": round(kalshi_imbalance, 3),
                 "kalshi_signal": kalshi_signal,
+                "price_velocity": round(velocity * 100, 2),  # cents per minute
                 "market_lean": market_lean,
                 "combined_confidence": round(combined_confidence * 100, 1),
                 "action": action,
@@ -279,10 +320,10 @@ def main():
             # Log every scan (concise)
             kalshi_arrow = "+" if kalshi_signal > 0 else "-" if kalshi_signal < 0 else "="
             log.info(
-                "%s | %s %.0f%%→%.0f%% | BTC=$%s | mkt=%.0fc kalshi=%s%.0f%% | edge=%.0f%% | %s | W%d/L%d $%.2f",
+                "%s | %s %.0f%%>%.0f%% | BTC=$%s | mkt=%.0fc kalshi=%s%.0f%% vel=%+.1fc/m | edge=%.0f%% | %s | W%d/L%d $%.2f",
                 ticker[-8:], direction.upper(), confidence * 100, combined_confidence * 100,
                 f"{btc:,.0f}" if btc else "?",
-                market_mid * 100, kalshi_arrow, abs(kalshi_imbalance) * 100,
+                market_mid * 100, kalshi_arrow, abs(kalshi_imbalance) * 100, velocity * 100,
                 edge * 100 if side else 0,
                 action, win_count, loss_count, daily_pnl / 100,
             )
