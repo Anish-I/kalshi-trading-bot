@@ -42,6 +42,7 @@ class CoinbaseCollector:
         self._running: bool = False
         self._ws = None
         self._reconnect_delay: float = 1.0
+        self._poll_task: asyncio.Task | None = None
 
         # Kline building state
         self._current_kline: Optional[dict] = None
@@ -99,8 +100,10 @@ class CoinbaseCollector:
         await ws.send(json.dumps(sub_msg))
         logger.info("Subscribed to market_trades for %s", self.symbol)
 
-        # Start orderbook polling in background
-        asyncio.create_task(self._poll_orderbook())
+        # Start orderbook polling in background (cancel previous if reconnecting)
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+        self._poll_task = asyncio.create_task(self._poll_orderbook())
 
     async def _poll_orderbook(self) -> None:
         """Poll Coinbase REST API for orderbook every 3 seconds."""

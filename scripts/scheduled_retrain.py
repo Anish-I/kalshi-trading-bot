@@ -89,13 +89,19 @@ def create_labels(df: pd.DataFrame) -> pd.DataFrame:
     fwd_ret = (fwd_price - df["btc_price"]) / df["btc_price"]
 
     # 3-class label: -1 (down), 0 (flat), 1 (up)
-    df["label"] = np.where(
+    labels = np.where(
         fwd_ret > LABEL_THRESHOLD, 1,
         np.where(fwd_ret < -LABEL_THRESHOLD, -1, 0)
-    )
+    ).astype(float)
 
-    # Drop rows where we can't compute forward return
-    df = df.dropna(subset=["label"]).copy()
+    # Last LABEL_HORIZON rows have no valid forward return — mark as NaN
+    labels[-LABEL_HORIZON:] = np.nan
+
+    df["label"] = labels
+
+    # Drop rows where we can't compute forward return (NaN from shift + trailing rows)
+    valid = ~np.isnan(df["label"])
+    df = df[valid].copy()
     # Shift label to 0-indexed for XGBoost: {-1 -> 0, 0 -> 1, 1 -> 2}
     df["label"] = df["label"].astype(int) + 1
 
@@ -103,7 +109,7 @@ def create_labels(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def train_model(df: pd.DataFrame) -> xgb.XGBClassifier:
+def train_model(df: pd.DataFrame) -> tuple[xgb.XGBClassifier, list[str]]:
     """Walk-forward split with purge gap, train XGBoost on CUDA."""
     feature_cols = [c for c in df.columns if c not in EXCLUDE_COLS]
     log.info(f"Using {len(feature_cols)} features")
@@ -146,10 +152,10 @@ def train_model(df: pd.DataFrame) -> xgb.XGBClassifier:
     log.info(f"Test accuracy: {acc:.4f}")
     log.info(f"Classification report:\n{classification_report(y_test, y_pred, zero_division=0)}")
 
-    return model
+    return model, feature_cols
 
 
-def save_model(model: xgb.XGBClassifier) -> Path:
+def save_model(model: xgb.XGBClassifier, feature_cols: list[str]) -> Path:
     """Save model with timestamp and update latest_model.json pointer."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_path = MODELS_DIR / f"xgb_balanced_{timestamp}.json"
@@ -157,9 +163,20 @@ def save_model(model: xgb.XGBClassifier) -> Path:
     model.save_model(str(model_path))
     log.info(f"Model saved: {model_path}")
 
+    # Save feature schema alongside model
+    schema_path = str(model_path).replace('.json', '.schema.json')
+    with open(schema_path, 'w') as f:
+        json.dump(feature_cols, f)
+    log.info(f"Feature schema saved: {schema_path}")
+
     # Update latest_model.json — copy the model file so latest always works
     shutil.copy2(str(model_path), str(LATEST_MODEL))
     log.info(f"Updated {LATEST_MODEL} -> {model_path.name}")
+
+    # Also save schema for latest_model
+    latest_schema = str(LATEST_MODEL).replace('.json', '.schema.json')
+    with open(latest_schema, 'w') as f:
+        json.dump(feature_cols, f)
 
     return model_path
 
@@ -172,8 +189,8 @@ def main():
     try:
         df = load_features()
         df = create_labels(df)
-        model = train_model(df)
-        model_path = save_model(model)
+        model, feature_cols = train_model(df)
+        model_path = save_model(model, feature_cols)
         log.info(f"RETRAIN COMPLETE: {model_path}")
     except Exception as e:
         log.exception(f"RETRAIN FAILED: {e}")

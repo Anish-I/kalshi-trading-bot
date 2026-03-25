@@ -61,6 +61,7 @@ async def on_trade(trade: dict) -> None:
     global trade_count, bar_5s_count, bar_1m_count
 
     trade_count += 1
+    prev_1m_len = len(aggregator.bars_1m)
     completed_bar = aggregator.add_trade(
         price=trade["price"],
         qty=trade["qty"],
@@ -71,11 +72,11 @@ async def on_trade(trade: dict) -> None:
     if completed_bar is not None:
         bar_5s_count += 1
 
-        # Check for completed 1m bar
-        completed_1m = aggregator._check_1m_bar(completed_bar)
-        if completed_1m is not None:
+        # add_trade() already handles 1m bar aggregation internally
+        # Just check if the deque grew
+        if len(aggregator.bars_1m) > prev_1m_len:
             bar_1m_count += 1
-            pipeline.update_1m_bar(completed_1m)
+            pipeline.update_1m_bar(dict(aggregator.bars_1m[-1]))
 
         # Compute features every 5s bar
         if len(aggregator.bars_5s) >= 24 and len(aggregator.bars_1m) >= 30:
@@ -211,6 +212,30 @@ async def main() -> None:
             on_depth=on_depth,
             on_kline=on_kline,
         )
+
+    # Always poll REST orderbook for 20-level depth (WS only gives L1)
+    import httpx as _httpx
+
+    async def poll_orderbook():
+        async with _httpx.AsyncClient(timeout=10) as client:
+            while True:
+                try:
+                    resp = await client.get(
+                        "https://api.exchange.coinbase.com/products/BTC-USD/book",
+                        params={"level": 2},
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        ob = {
+                            "bids": [[float(b[0]), float(b[1])] for b in data.get("bids", [])[:20]],
+                            "asks": [[float(a[0]), float(a[1])] for a in data.get("asks", [])[:20]],
+                        }
+                        await on_depth(ob)
+                except Exception:
+                    pass
+                await asyncio.sleep(3)
+
+    asyncio.get_event_loop().create_task(poll_orderbook())
 
     try:
         await collector.start()

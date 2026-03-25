@@ -63,10 +63,12 @@ def get_latest_model_path():
 # State
 traded_tickers: set = set()
 settled_tickers: set = set()
+resting_orders: dict[str, str] = {}  # ticker -> order_id
 daily_pnl = 0
 trade_count = 0
 win_count = 0
 loss_count = 0
+last_reset_date: str = ""
 price_history: dict[str, list[tuple[float, float]]] = {}
 
 
@@ -125,6 +127,29 @@ def get_kalshi_orderbook(c, ticker):
     return 0.0
 
 
+def check_resting_orders(c):
+    global trade_count, traded_tickers, resting_orders
+    resolved = []
+    for ticker, order_id in resting_orders.items():
+        try:
+            resp = c._request("GET", f"/portfolio/orders/{order_id}")
+            order_data = resp.get("order", resp)
+            status = order_data.get("status", "")
+            if status == "executed":
+                trade_count += 1
+                resolved.append(ticker)
+                log.info("Resting order FILLED: %s (%s)", ticker, order_id)
+            elif status in ("canceled", "expired"):
+                traded_tickers.discard(ticker)
+                resolved.append(ticker)
+                log.info("Resting order %s: %s (%s) — freed for retry",
+                         status.upper(), ticker, order_id)
+        except Exception as e:
+            log.debug("Failed to check resting order %s: %s", order_id, e)
+    for t in resolved:
+        resting_orders.pop(t, None)
+
+
 def check_settlements(c):
     global daily_pnl, win_count, loss_count, settled_tickers
     try:
@@ -180,12 +205,28 @@ def main():
     tracker = KXBTCMarketTracker(c)
     log.info("Balance: $%.2f", c.get_balance())
 
-    global traded_tickers, daily_pnl, trade_count, win_count, loss_count
+    global traded_tickers, daily_pnl, trade_count, win_count, loss_count, last_reset_date, resting_orders
     scan_count = 0
 
     while True:
         try:
             scan_count += 1
+
+            # Daily risk reset
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if today != last_reset_date:
+                if last_reset_date:  # don't log on first iteration
+                    log.info("Daily reset: W%d/L%d pnl=$%.2f", win_count, loss_count, daily_pnl / 100)
+                daily_pnl = 0
+                win_count = 0
+                loss_count = 0
+                trade_count = 0
+                traded_tickers.clear()
+                settled_tickers.clear()
+                resting_orders.clear()
+                last_reset_date = today
+
+            check_resting_orders(c)
             check_settlements(c)
 
             market = tracker.get_next_market()
@@ -331,8 +372,14 @@ def main():
 
                     status = order.get("order", order).get("status", "?")
                     log.info("    Order: %s", status)
-                    traded_tickers.add(ticker)
-                    trade_count += 1
+                    if status == "executed":
+                        traded_tickers.add(ticker)
+                        trade_count += 1
+                    elif status == "resting":
+                        order_id = order.get("order", order).get("order_id", "")
+                        if order_id:
+                            resting_orders[ticker] = order_id
+                        traded_tickers.add(ticker)  # still prevent duplicate orders
                 except Exception as e:
                     log.error("    Order FAILED: %s", e)
 

@@ -67,6 +67,21 @@ class WeatherMarketAnalyzer:
         return ("unknown", 0.0, 0.0)
 
     # ------------------------------------------------------------------ #
+    #  Ticker date extraction
+    # ------------------------------------------------------------------ #
+
+    def _extract_date_from_ticker(self, ticker: str) -> str | None:
+        """Extract date from ticker like KXHIGHNY-26MAR25-T58 -> 2026-03-25"""
+        match = re.search(r'-(\d{2})([A-Z]{3})(\d{2})-', ticker)
+        if not match:
+            return None
+        day, mon_str, yr = match.groups()
+        months = {'JAN':'01','FEB':'02','MAR':'03','APR':'04','MAY':'05','JUN':'06',
+                  'JUL':'07','AUG':'08','SEP':'09','OCT':'10','NOV':'11','DEC':'12'}
+        mon = months.get(mon_str, '01')
+        return f"20{yr}-{mon}-{day}"
+
+    # ------------------------------------------------------------------ #
     #  Single-city scan
     # ------------------------------------------------------------------ #
 
@@ -85,17 +100,8 @@ class WeatherMarketAnalyzer:
         list[dict]
             Opportunities sorted by edge descending.
         """
-        if target_date is None:
-            target_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
         city_name = city["name"]
-
-        # --- Forecast ---
-        try:
-            mean, std = self.engine.get_forecast_temp(city, target_date)
-        except Exception:
-            logger.error("Forecast failed for %s on %s, skipping", city_name, target_date, exc_info=True)
-            return []
 
         # --- Fetch open markets ---
         try:
@@ -117,7 +123,20 @@ class WeatherMarketAnalyzer:
             logger.info("No open markets for %s (%s)", city_name, city["series_ticker"])
             return []
 
+        # Extract date from first market ticker if not provided
+        if markets and target_date is None:
+            target_date = self._extract_date_from_ticker(markets[0].get("ticker", ""))
+        if target_date is None:
+            target_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
         logger.info("Found %d open markets for %s", len(markets), city_name)
+
+        # --- Forecast (after date is resolved from ticker) ---
+        try:
+            mean, std = self.engine.get_forecast_temp(city, target_date)
+        except Exception:
+            logger.error("Forecast failed for %s on %s, skipping", city_name, target_date, exc_info=True)
+            return []
 
         # --- Evaluate each market ---
         opportunities: list[dict] = []
@@ -136,7 +155,7 @@ class WeatherMarketAnalyzer:
                 strike_value = (strike_low + strike_high) / 2.0
             else:
                 strike_value = strike_low
-            model_prob = self.engine.evaluate_strike(mean, std, strike_type, strike_value)
+            model_prob, _ = self.engine.evaluate_strike_ensemble(city, target_date, strike_type, strike_value)
 
             # Market prices (dollars as probability, e.g. 0.0500 = 5%)
             yes_bid = float(mkt.get("yes_bid_dollars", 0) or 0)
@@ -152,21 +171,18 @@ class WeatherMarketAnalyzer:
             # Mid price as market-implied probability
             market_mid = (yes_bid + yes_ask) / 2.0 if yes_ask > 0 else yes_bid
 
-            # Edge calculation
-            yes_edge = model_prob - market_mid
-            no_edge = market_mid - model_prob  # (1 - model_prob) - (1 - market_mid)
-
-            if model_prob > market_mid:
+            # Edge against execution price (ask), not midpoint
+            if model_prob > yes_ask and yes_ask > 0:
                 side = "YES"
-                edge = yes_edge
-                # Suggested limit: don't pay more than our model probability,
-                # but also don't exceed the current ask
-                suggested_price = min(model_prob, yes_ask) if yes_ask > 0 else model_prob
-            else:
+                edge = model_prob - yes_ask
+                suggested_price = min(model_prob, yes_ask)
+            elif (1.0 - model_prob) > no_ask and no_ask > 0:
                 side = "NO"
-                edge = no_edge
-                # For NO side, price in terms of NO cost = (1 - yes_price)
-                suggested_price = min(1.0 - model_prob, no_ask) if no_ask > 0 else (1.0 - model_prob)
+                edge = (1.0 - model_prob) - no_ask
+                suggested_price = min(1.0 - model_prob, no_ask)
+            else:
+                # No edge on either side
+                continue
 
             suggested_price_cents = max(1, min(99, round(suggested_price * 100)))
 

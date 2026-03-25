@@ -22,11 +22,28 @@ class XGBoostModel:
     def __init__(self, model_path: str):
         self.booster = xgb.Booster()
         self.booster.load_model(model_path)
+        # Load feature schema if available
+        schema_path = model_path.replace('.json', '.schema.json')
+        self.feature_cols = None
+        try:
+            import json
+            with open(schema_path) as f:
+                self.feature_cols = json.load(f)
+            logger.info("Loaded feature schema (%d cols) from %s", len(self.feature_cols), schema_path)
+        except Exception:
+            logger.warning("No feature schema found at %s, using dynamic columns", schema_path)
         logger.info("XGBoost loaded from %s", model_path)
 
     def score(self, features_df) -> tuple[str, float]:
         exclude = {"timestamp", "btc_price", "label"}
-        cols = [c for c in features_df.columns if c not in exclude]
+        if self.feature_cols:
+            # Ensure exact column match with training schema
+            for col in self.feature_cols:
+                if col not in features_df.columns:
+                    features_df[col] = 0.0
+            cols = self.feature_cols
+        else:
+            cols = [c for c in features_df.columns if c not in exclude]
         X = features_df[cols].iloc[-1:].replace([np.inf, -np.inf], np.nan).fillna(0).astype(np.float32)
         dmat = xgb.DMatrix(X)
         proba = self.booster.predict(dmat)[0]
