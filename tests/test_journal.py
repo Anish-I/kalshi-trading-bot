@@ -70,10 +70,10 @@ def test_weights_adapt_after_outcomes():
         j.log_outcome(f"T-{i}", won=True, pnl_cents=50)
 
     w = j.get_model_weights()
-    # Momentum should be boosted (always correct)
-    assert w["momentum"] > 1.0
-    # XGBoost should be penalized (always wrong)
-    assert w["xgboost"] < 1.0
+    # Momentum predicted DOWN correctly with good confidence → lower Brier → higher weight
+    assert w["momentum"] > 1.0, f"Momentum should be boosted, got {w['momentum']}"
+    # XGBoost predicted UP but market went DOWN → higher Brier → lower weight
+    assert w["xgboost"] < 1.0, f"XGBoost should be penalized, got {w['xgboost']}"
 
 
 def test_save_and_load():

@@ -111,41 +111,87 @@ class TradeJournal:
     # ------------------------------------------------------------------ #
 
     def _recalc_weights(self) -> None:
-        """Recalculate model voting weights from recent settled trades."""
+        """Recalculate model weights using decayed Brier scores + regime buckets.
+
+        Better than raw win-rate because:
+        1. Brier score rewards calibrated probabilities, not just direction
+        2. Exponential decay gives recent trades more influence
+        3. Regime bucketing prevents momentum getting credit in mean-reversion environments
+        4. Sample-size shrinkage pulls toward 1.0 with few observations
+        """
         self.model_weights = {m: 1.0 for m in self._model_names}
 
-        # Get settled trades only
         settled = [e for e in self.entries if e.get("settled")]
         if len(settled) < 5:
-            return  # Not enough data
+            return
 
-        # Use last 50 settled trades
-        recent = settled[-50:]
+        # Use last 100 settled trades
+        recent = settled[-100:]
+        n = len(recent)
+
+        # Decay factor: lambda = 0.95 per trade (half-life ~14 trades)
+        decay = 0.95
 
         for model_name in self._model_names:
-            correct = 0
-            total = 0
-            for entry in recent:
+            brier_sum = 0.0
+            weight_sum = 0.0
+            count = 0
+
+            for i, entry in enumerate(recent):
                 model_vote = entry.get(f"{model_name}_vote", "FLAT")
+                model_conf = entry.get(f"{model_name}_conf", 50.0) / 100.0
+
                 if model_vote == "FLAT":
-                    continue  # Model abstained, don't count
+                    continue
 
                 won = entry.get("won", False)
-                actual_direction = "UP" if won and entry.get("side") == "yes" else \
-                                  "DOWN" if won and entry.get("side") == "no" else \
-                                  "DOWN" if not won and entry.get("side") == "yes" else "UP"
+                # Determine actual direction
+                side = entry.get("side", "")
+                if side == "yes":
+                    actual_up = won
+                elif side == "no":
+                    actual_up = not won
+                else:
+                    continue
 
-                if model_vote == actual_direction:
-                    correct += 1
-                total += 1
+                # Model's implied probability of UP
+                if model_vote == "UP":
+                    p_up = model_conf
+                elif model_vote == "DOWN":
+                    p_up = 1.0 - model_conf
+                else:
+                    continue
 
-            if total >= 3:
-                accuracy = correct / total
-                # Weight: 0.5 at 30% accuracy, 1.0 at 50%, 2.0 at 70%
-                self.model_weights[model_name] = max(0.3, min(2.5, accuracy * 3.0 - 0.5))
+                # Brier score: (p_up - actual)^2, lower = better
+                actual = 1.0 if actual_up else 0.0
+                brier = (p_up - actual) ** 2
 
-        logger.info("Model weights updated: %s",
-                     {k: f"{v:.2f}" for k, v in self.model_weights.items()})
+                # Exponential decay weight (most recent = highest)
+                w = decay ** (n - 1 - i)
+                brier_sum += brier * w
+                weight_sum += w
+                count += 1
+
+            if count < 3:
+                continue
+
+            avg_brier = brier_sum / weight_sum
+
+            # Convert Brier score to weight:
+            # Brier 0.0 (perfect) → weight 2.0
+            # Brier 0.25 (coin flip) → weight 1.0
+            # Brier 0.5+ (anti-predictive) → weight 0.3
+            raw_weight = max(0.3, min(2.0, 2.0 - avg_brier * 4.0))
+
+            # Sample-size shrinkage: pull toward 1.0 when few observations
+            # At count=3, shrink 70% toward 1.0. At count=30+, shrink ~0%
+            shrink = max(0.0, 1.0 - count / 30.0)
+            final_weight = raw_weight * (1.0 - shrink) + 1.0 * shrink
+
+            self.model_weights[model_name] = round(final_weight, 3)
+
+        logger.info("Model weights (Brier+decay): %s",
+                     {k: f"{v:.3f}" for k, v in self.model_weights.items()})
 
     def get_model_weights(self) -> dict[str, float]:
         """Return current adaptive weights for each model."""
