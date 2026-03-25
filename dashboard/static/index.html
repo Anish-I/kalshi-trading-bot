@@ -76,18 +76,11 @@
 </div>
 
 <div class="section">
-  <div class="section-title">Model Thinking</div>
-  <div id="model-thinking">
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-      <div>
-        <div style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Crypto ML Trader</div>
-        <div id="crypto-thinking" style="font-size:13px;">Waiting for data...</div>
-      </div>
-      <div>
-        <div style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Weather Trader</div>
-        <div id="weather-thinking" style="font-size:13px;">Waiting for data...</div>
-      </div>
-    </div>
+  <div class="section-title">Model Voting</div>
+  <div id="crypto-thinking">Waiting for data...</div>
+  <div style="margin-top:12px;padding-top:12px;border-top:1px solid #21262d;">
+    <div style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Weather Trader</div>
+    <div id="weather-thinking" style="font-size:13px;">Waiting for data...</div>
   </div>
 </div>
 
@@ -214,43 +207,47 @@ async function refresh() {
       const cr = logsRes.crypto || {};
       const wr = logsRes.weather || {};
 
-      if (cr.prediction) {
-        const arrow = cr.prediction === 'UP' ? '&#9650;' : cr.prediction === 'DOWN' ? '&#9660;' : '&#9644;';
+      if (cr.ticker) {
         const color = cr.prediction === 'UP' ? '#3fb950' : cr.prediction === 'DOWN' ? '#f85149' : '#8b949e';
-        const actionColor = cr.action === 'trading' ? '#3fb950' : cr.action === 'no_consensus' ? '#d29922' : cr.action === 'monitoring' ? '#8b949e' : '#484f58';
+        const actionColors = {trading:'#3fb950', no_consensus:'#d29922', monitoring:'#58a6ff', outside_window:'#484f58', already_traded:'#484f58', no_edge:'#d29922', loss_limit_hit:'#f85149'};
+        const actionColor = actionColors[cr.action] || '#8b949e';
 
-        // Per-model votes
-        let modelsHtml = '';
-        if (cr.models) {
-          const modelOrder = ['xgboost', 'momentum', 'mean_reversion', 'kalshi_consensus'];
-          const modelLabels = {xgboost:'XGB', momentum:'MOM', mean_reversion:'MR', kalshi_consensus:'KAL'};
-          modelsHtml = '<div style="display:flex;gap:8px;margin:6px 0;">' +
-            modelOrder.map(m => {
-              const v = cr.models[m] || {};
-              const vc = v.vote === 'UP' ? '#3fb950' : v.vote === 'DOWN' ? '#f85149' : '#484f58';
-              const va = v.vote === 'UP' ? '&#9650;' : v.vote === 'DOWN' ? '&#9660;' : '-';
-              return `<div style="background:#21262d;padding:4px 8px;border-radius:4px;border:1px solid ${vc};font-size:11px;text-align:center;">
-                <div style="color:#8b949e;">${modelLabels[m]}</div>
-                <div style="color:${vc};font-size:14px;">${va}</div>
-                <div style="color:${vc};font-size:10px;">${v.confidence || 0}%</div>
-              </div>`;
-            }).join('') + '</div>';
-        }
+        // Vote boxes
+        const modelOrder = ['xgboost', 'momentum', 'mean_reversion', 'kalshi_consensus'];
+        const modelLabels = {xgboost:'XGBoost', momentum:'Momentum', mean_reversion:'MeanRev', kalshi_consensus:'Kalshi OB'};
+        const models = cr.models || {};
 
-        const confBar = `<div style="background:#21262d;border-radius:4px;height:8px;margin:4px 0;position:relative;">` +
-          `<div style="background:${color};height:100%;border-radius:4px;width:${cr.confidence}%;"></div></div>`;
+        const votesHtml = modelOrder.map(m => {
+          const v = models[m] || {vote:'FLAT', confidence:0};
+          const vc = v.vote === 'UP' ? '#3fb950' : v.vote === 'DOWN' ? '#f85149' : '#30363d';
+          const arrow = v.vote === 'UP' ? '&#9650; UP' : v.vote === 'DOWN' ? '&#9660; DN' : '&mdash;';
+          return `<div style="flex:1;background:#0d1117;border:2px solid ${vc};border-radius:6px;padding:8px;text-align:center;">
+            <div style="color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;">${modelLabels[m]}</div>
+            <div style="color:${vc};font-size:18px;font-weight:bold;margin:4px 0;">${arrow}</div>
+            <div style="color:${vc};font-size:12px;">${v.confidence}%</div>
+          </div>`;
+        }).join('');
+
+        const agreement = cr.agreement || 0;
+        const agreeColor = agreement >= 3 ? '#3fb950' : agreement >= 2 ? '#d29922' : '#f85149';
 
         document.getElementById('crypto-thinking').innerHTML = `
-          <div style="font-size:20px;color:${color};margin-bottom:2px;">${arrow} ${cr.prediction} <span style="font-size:14px;">${cr.agreement || 0}/4 agree | ${cr.confidence}%</span></div>
-          ${modelsHtml}
-          ${confBar}
-          <div style="color:#8b949e;font-size:12px;">
-            BTC: $${cr.btc_price ? cr.btc_price.toLocaleString() : '?'} | ${cr.ticker || '?'} (${cr.remaining_s}s)<br>
-            YES ${(cr.yes_ask*100).toFixed(0)}c / NO ${(cr.no_ask*100).toFixed(0)}c | Edge: ${cr.edge}%<br>
-            <span style="color:${actionColor}">${cr.action}</span> |
-            W${cr.wins}/L${cr.losses} | $${(cr.daily_pnl_cents/100).toFixed(2)}
+          <div style="display:flex;gap:8px;margin-bottom:10px;">${votesHtml}</div>
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+            <div style="font-size:22px;color:${color};font-weight:bold;">${cr.prediction === 'UP' ? '&#9650;' : cr.prediction === 'DOWN' ? '&#9660;' : '&#9644;'} ${cr.prediction}</div>
+            <div style="background:${agreeColor};color:#0d1117;padding:2px 10px;border-radius:12px;font-size:13px;font-weight:bold;">${agreement}/4</div>
+            <div style="color:#8b949e;font-size:13px;">conf ${cr.confidence}%</div>
+            <div style="background:${actionColor};color:#0d1117;padding:2px 8px;border-radius:4px;font-size:11px;">${cr.action}</div>
           </div>
-          <div style="color:#484f58;font-size:11px;margin-top:4px;">${fmtTime(cr.time)}</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;color:#8b949e;font-size:12px;">
+            <div>BTC: $${cr.btc_price ? cr.btc_price.toLocaleString() : '?'}</div>
+            <div>${cr.ticker || ''} (${Math.floor((cr.remaining_s||0)/60)}m ${(cr.remaining_s||0)%60}s)</div>
+            <div>YES ${(cr.yes_ask*100).toFixed(0)}c / NO ${(cr.no_ask*100).toFixed(0)}c</div>
+            <div>Edge: ${cr.edge}% | Vel: ${cr.price_velocity || 0}c/m</div>
+            <div>Today: W${cr.wins||0}/L${cr.losses||0}</div>
+            <div>P&L: <span class="${(cr.daily_pnl_cents||0) >= 0 ? 'green' : 'red'}">$${((cr.daily_pnl_cents||0)/100).toFixed(2)}</span></div>
+          </div>
+          <div style="color:#484f58;font-size:10px;margin-top:6px;">${fmtTime(cr.time)}</div>
         `;
       }
 
