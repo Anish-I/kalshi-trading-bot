@@ -123,6 +123,51 @@ function fmtUptime(s) {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+// --- Notifications ---
+let lastNotifTime = '';
+
+function requestNotifPermission() {
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
+}
+requestNotifPermission();
+
+function showNotification(notif) {
+  if (!notif || !notif.time || notif.time === lastNotifTime) return;
+  lastNotifTime = notif.time;
+
+  const arrow = notif.side === 'YES' ? 'UP' : 'DOWN';
+  const title = `TRADE: ${arrow} @ ${notif.price}c x${notif.contracts}`;
+  const body = `${notif.ticker}\n$${notif.bet} bet | ${notif.agreement}/4 agree | ${notif.confidence}% conf\nBTC: $${notif.btc_price ? notif.btc_price.toLocaleString() : '?'} | ${notif.status}`;
+
+  // Browser notification
+  if ('Notification' in window && Notification.permission === 'granted') {
+    new Notification(title, { body, icon: notif.side === 'YES' ? undefined : undefined });
+  }
+
+  // In-page banner
+  const banner = document.createElement('div');
+  banner.style.cssText = `position:fixed;top:10px;right:10px;background:${notif.side==='YES'?'#3fb950':'#f85149'};color:#0d1117;padding:12px 20px;border-radius:8px;font-family:monospace;font-size:13px;z-index:9999;max-width:350px;box-shadow:0 4px 12px rgba(0,0,0,0.5);cursor:pointer;`;
+  banner.innerHTML = `<div style="font-weight:bold;font-size:15px;">${title}</div><div style="margin-top:4px;font-size:12px;">${body.replace(/\n/g,'<br>')}</div>`;
+  banner.onclick = () => banner.remove();
+  document.body.appendChild(banner);
+  setTimeout(() => banner.remove(), 15000);
+
+  // Sound
+  try {
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value = notif.side === 'YES' ? 800 : 400;
+    gain.gain.value = 0.1;
+    osc.start();
+    osc.stop(ctx.currentTime + 0.2);
+  } catch(e) {}
+}
+
 async function botAction(name, action) {
   try {
     await fetch(`/api/bots/${name}/${action}`, { method: 'POST' });
@@ -206,6 +251,11 @@ async function refresh() {
       const logsRes = await fetch('/api/logs').then(r => r.json());
       const cr = logsRes.crypto || {};
       const wr = logsRes.weather || {};
+
+      // Check for trade notifications
+      if (logsRes.notification && logsRes.notification.type === 'trade') {
+        showNotification(logsRes.notification);
+      }
 
       if (cr.ticker) {
         const color = cr.prediction === 'UP' ? '#3fb950' : cr.prediction === 'DOWN' ? '#f85149' : '#8b949e';

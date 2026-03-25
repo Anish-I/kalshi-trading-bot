@@ -379,7 +379,29 @@ def main():
                         order_id = order.get("order", order).get("order_id", "")
                         if order_id:
                             resting_orders[ticker] = order_id
-                        traded_tickers.add(ticker)  # still prevent duplicate orders
+                        traded_tickers.add(ticker)
+
+                    # Write notification for dashboard
+                    notif = {
+                        "type": "trade",
+                        "time": datetime.now(timezone.utc).isoformat(),
+                        "ticker": ticker,
+                        "side": side.upper(),
+                        "price": price_cents,
+                        "contracts": contracts,
+                        "bet": bet_dollars,
+                        "agreement": agreement,
+                        "confidence": round(combined_conf * 100, 1),
+                        "edge": round(edge * 100, 1),
+                        "status": status,
+                        "btc_price": btc,
+                    }
+                    try:
+                        notif_path = Path(settings.DATA_DIR) / "notifications.json"
+                        notif_path.write_text(json.dumps(notif, default=str))
+                    except Exception:
+                        pass
+
                 except Exception as e:
                     log.error("    Order FAILED: %s", e)
 

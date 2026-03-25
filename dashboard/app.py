@@ -154,6 +154,7 @@ def get_logs():
     """Return live state from both traders."""
     crypto_state = {}
     weather_state = {}
+    notification = {}
 
     try:
         f = DATA_DIR / "ml_trader_state.json"
@@ -169,4 +170,11 @@ def get_logs():
     except Exception:
         pass
 
-    return {"crypto": crypto_state, "weather": weather_state}
+    try:
+        f = DATA_DIR / "notifications.json"
+        if f.exists():
+            notification = json.loads(f.read_text())
+    except Exception:
+        pass
+
+    return {"crypto": crypto_state, "weather": weather_state, "notification": notification}
