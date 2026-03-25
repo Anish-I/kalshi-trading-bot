@@ -201,37 +201,38 @@ class KalshiConsensusModel:
         return "flat", 0.50
 
 
-def vote(results: list[tuple[str, float]]) -> tuple[str, float, int]:
-    """Combine model votes into a single trading decision.
+def vote(
+    results: list[tuple[str, float]],
+    weights: list[float] | None = None,
+) -> tuple[str, float, float]:
+    """Weighted voting: models with higher adaptive weights count more.
 
     Args:
         results: List of (direction, confidence) from each model.
+        weights: Per-model weights (default 1.0 each). A weight of 2.0
+                 means that model's vote counts double.
 
     Returns:
-        (direction, avg_confidence, agreement_count)
-        - 3-4 agree → strong signal, full confidence
-        - 2 agree (0 oppose) → moderate signal, reduced confidence
-        - <2 agree or conflicting → flat, no trade
+        (direction, clamped_confidence, weighted_score)
+        - weighted_score >= 2.0 with no stronger opposition → trade
+        - Otherwise → flat, no trade
+        - Confidence always clamped to [0, 0.95]
     """
-    up_votes = [(d, c) for d, c in results if d == "up"]
-    down_votes = [(d, c) for d, c in results if d == "down"]
-    n_up = len(up_votes)
-    n_down = len(down_votes)
+    if weights is None:
+        weights = [1.0] * len(results)
 
-    if n_up >= 3:
-        avg_conf = mean(c for _, c in up_votes)
-        return "up", avg_conf, n_up
+    up_score = sum(w for (d, _), w in zip(results, weights) if d == "up")
+    down_score = sum(w for (d, _), w in zip(results, weights) if d == "down")
 
-    if n_down >= 3:
-        avg_conf = mean(c for _, c in down_votes)
-        return "down", avg_conf, n_down
+    if up_score >= 2.0 and up_score > down_score:
+        # Weighted average of UP-voting models' confidences
+        total_w = sum(w for (d, _), w in zip(results, weights) if d == "up")
+        avg_conf = sum(c * w for (d, c), w in zip(results, weights) if d == "up") / total_w
+        return "up", min(avg_conf, 0.95), round(up_score, 2)
 
-    if n_up == 2 and n_down == 0:
-        avg_conf = mean(c for _, c in up_votes) * 0.9
-        return "up", avg_conf, n_up
+    if down_score >= 2.0 and down_score > up_score:
+        total_w = sum(w for (d, _), w in zip(results, weights) if d == "down")
+        avg_conf = sum(c * w for (d, c), w in zip(results, weights) if d == "down") / total_w
+        return "down", min(avg_conf, 0.95), round(down_score, 2)
 
-    if n_down == 2 and n_up == 0:
-        avg_conf = mean(c for _, c in down_votes) * 0.9
-        return "down", avg_conf, n_down
-
-    return "flat", 0.50, 0
+    return "flat", 0.50, 0.0

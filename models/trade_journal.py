@@ -58,6 +58,9 @@ class TradeJournal:
             "time": datetime.now(timezone.utc).isoformat(),
             "ticker": ticker,
             "btc_price": btc_price,
+            "won": None,
+            "pnl_cents": None,
+            "settled": False,
             "vote_result": vote_result,
             "agreement": agreement,
             "action": action,
@@ -85,7 +88,7 @@ class TradeJournal:
     def log_outcome(self, ticker: str, won: bool, pnl_cents: int) -> None:
         """Update the most recent entry for this ticker with the outcome."""
         for entry in reversed(self.entries):
-            if entry.get("ticker") == ticker and entry.get("action") == "trading":
+            if entry.get("ticker") == ticker and entry.get("action") in ("trading", "pending", "executed", "resting"):
                 entry["won"] = won
                 entry["pnl_cents"] = pnl_cents
                 entry["settled"] = True

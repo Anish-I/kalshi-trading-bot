@@ -279,15 +279,21 @@ def main():
             velocity = get_price_velocity(ticker, market_mid)
             kalshi_vote, kalshi_conf = kalshi_model.score(kalshi_imb, velocity, market_mid)
 
-            # --- Vote with adaptive weights ---
+            # --- Weighted vote ---
             weights = journal.get_model_weights()
             all_votes = [
-                (xgb_vote, xgb_conf * weights.get("xgboost", 1.0)),
-                (mom_vote, mom_conf * weights.get("momentum", 1.0)),
-                (mr_vote, mr_conf * weights.get("mean_reversion", 1.0)),
-                (kalshi_vote, kalshi_conf * weights.get("kalshi_consensus", 1.0)),
+                (xgb_vote, xgb_conf),
+                (mom_vote, mom_conf),
+                (mr_vote, mr_conf),
+                (kalshi_vote, kalshi_conf),
             ]
-            direction, combined_conf, agreement = vote(all_votes)
+            weight_list = [
+                weights.get("xgboost", 1.0),
+                weights.get("momentum", 1.0),
+                weights.get("mean_reversion", 1.0),
+                weights.get("kalshi_consensus", 1.0),
+            ]
+            direction, combined_conf, agreement = vote(all_votes, weight_list)
 
             # --- Determine action ---
             action = "monitoring"
@@ -362,19 +368,20 @@ def main():
                 action, win_count, loss_count, daily_pnl / 100,
             )
 
-            # --- Journal every decision ---
+            # --- Journal every trade decision (not monitoring/outside_window) ---
             models_dict = {
                 "xgboost": {"vote": xgb_vote.upper(), "confidence": round(xgb_conf * 100, 1)},
                 "momentum": {"vote": mom_vote.upper(), "confidence": round(mom_conf * 100, 1)},
                 "mean_reversion": {"vote": mr_vote.upper(), "confidence": round(mr_conf * 100, 1)},
                 "kalshi_consensus": {"vote": kalshi_vote.upper(), "confidence": round(kalshi_conf * 100, 1)},
             }
-            journal.log_decision(
-                ticker=ticker, btc_price=btc or 0, models=models_dict,
-                vote_result=direction.upper(), agreement=agreement, action=action,
-                side=side, edge=round(edge, 4) if side else None,
-                features_snapshot=last_row if last_row else None,
-            )
+            if action == "trading":
+                journal.log_decision(
+                    ticker=ticker, btc_price=btc or 0, models=models_dict,
+                    vote_result=direction.upper(), agreement=agreement, action="pending",
+                    side=side, edge=round(edge, 4) if side else None,
+                    features_snapshot=last_row if last_row else None,
+                )
 
             # --- Execute trade ---
             if action == "trading" and side:
@@ -411,11 +418,13 @@ def main():
                             resting_orders[ticker] = order_id
                         traded_tickers.add(ticker)
 
-                    # Update journal with execution details
-                    journal.entries[-1]["entry_price"] = price_cents
-                    journal.entries[-1]["contracts"] = contracts
-                    journal.entries[-1]["bet_dollars"] = bet_dollars
-                    journal.save()
+                    # Update journal: pending → executed/resting
+                    if journal.entries:
+                        journal.entries[-1]["action"] = "executed" if status == "executed" else status
+                        journal.entries[-1]["entry_price"] = price_cents
+                        journal.entries[-1]["contracts"] = contracts
+                        journal.entries[-1]["bet_dollars"] = bet_dollars
+                        journal.save()
 
                     # Write notification for dashboard
                     notif = {
@@ -440,6 +449,9 @@ def main():
 
                 except Exception as e:
                     log.error("    Order FAILED: %s", e)
+                    if journal.entries:
+                        journal.entries[-1]["action"] = "failed"
+                        journal.save()
 
             # Save journal periodically
             if scan_count % 10 == 0:
