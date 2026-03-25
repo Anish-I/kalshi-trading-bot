@@ -2,7 +2,14 @@
 
 import asyncio
 import logging
+import warnings
 from datetime import datetime, timezone
+
+warnings.warn(
+    "trading_engine.py is deprecated — uses Binance paths. "
+    "Use scripts/crypto_ml_trader.py instead.",
+    DeprecationWarning, stacklevel=2,
+)
 
 import numpy as np
 import pandas as pd

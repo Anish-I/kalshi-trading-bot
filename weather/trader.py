@@ -24,13 +24,16 @@ class WeatherTrader:
 
         # --- Risk management ---
         self.risk_manager = RiskManager(
-            max_contracts=25,
-            daily_loss_limit_cents=2000,
+            max_contracts=settings.WEATHER_MAX_CONTRACTS,
+            daily_loss_limit_cents=int(settings.DAILY_LOSS_LIMIT_CENTS * 0.4),
             consecutive_loss_halt=3,
         )
 
         # --- Position tracking ---
         self.position_manager = PositionManager()
+
+        # --- Resting order tracking ---
+        self._resting_orders: dict[str, str] = {}  # ticker -> order_id
 
         # --- Weather data sources ---
         self.nws_client = NWSClient(user_agent=settings.NWS_USER_AGENT)
@@ -48,11 +51,50 @@ class WeatherTrader:
             forecast_engine=self.forecast_engine,
         )
 
+        self._last_reset_date: str = ""
+
         logger.info(
-            "WeatherTrader initialised  |  max_contracts=25  daily_loss=2000c  "
+            "WeatherTrader initialised  |  max_contracts=%d  daily_loss=%dc  "
             "consecutive_halt=3  edge_threshold=%.0f%%",
+            settings.WEATHER_MAX_CONTRACTS,
+            int(settings.DAILY_LOSS_LIMIT_CENTS * 0.4),
             settings.WEATHER_EDGE_THRESHOLD * 100,
         )
+
+    # ------------------------------------------------------------------ #
+    #  Resting order reconciliation
+    # ------------------------------------------------------------------ #
+
+    def check_resting_orders(self) -> None:
+        resolved = []
+        for ticker, order_id in self._resting_orders.items():
+            try:
+                resp = self.kalshi_client._request("GET", f"/portfolio/orders/{order_id}")
+                order_data = resp.get("order", resp)
+                status = order_data.get("status", "")
+                if status == "executed":
+                    resolved.append(ticker)
+                    logger.info("Weather resting order FILLED: %s", ticker)
+                elif status in ("canceled", "expired"):
+                    resolved.append(ticker)
+                    logger.info("Weather resting order %s: %s — position NOT opened", status, ticker)
+            except Exception:
+                pass
+        for t in resolved:
+            self._resting_orders.pop(t, None)
+
+    # ------------------------------------------------------------------ #
+    #  Daily reset
+    # ------------------------------------------------------------------ #
+
+    def daily_reset_if_needed(self) -> None:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if today != self._last_reset_date:
+            if self._last_reset_date:
+                logger.info("Weather daily reset")
+            self.risk_manager.reset_daily()
+            self._resting_orders.clear()
+            self._last_reset_date = today
 
     # ------------------------------------------------------------------ #
     #  Scan
@@ -154,13 +196,19 @@ class WeatherTrader:
                 logger.error("Failed to place order on %s", ticker, exc_info=True)
                 continue
 
-            # --- Record position ---
-            self.position_manager.open_position(
-                ticker=ticker,
-                side=side,
-                count=contracts_per_trade,
-                entry_price_cents=price_cents,
-            )
+            # --- Record position only if filled ---
+            order_data = order_resp.get("order", order_resp)
+            status = order_data.get("status", "")
+            order_id = order_data.get("order_id", "")
+
+            if status == "executed":
+                self.position_manager.open_position(
+                    ticker=ticker, side=side, count=contracts_per_trade,
+                    entry_price_cents=price_cents,
+                )
+            elif status == "resting" and order_id:
+                self._resting_orders[ticker] = order_id
+                logger.info("Weather order resting: %s (%s)", ticker, order_id)
 
             executed.append({
                 "ticker": ticker,

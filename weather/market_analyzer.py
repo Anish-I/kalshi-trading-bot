@@ -123,85 +123,88 @@ class WeatherMarketAnalyzer:
             logger.info("No open markets for %s (%s)", city_name, city["series_ticker"])
             return []
 
-        # Extract date from first market ticker if not provided
-        if markets and target_date is None:
-            target_date = self._extract_date_from_ticker(markets[0].get("ticker", ""))
-        if target_date is None:
-            target_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
         logger.info("Found %d open markets for %s", len(markets), city_name)
 
-        # --- Forecast (after date is resolved from ticker) ---
-        try:
-            mean, std = self.engine.get_forecast_temp(city, target_date)
-        except Exception:
-            logger.error("Forecast failed for %s on %s, skipping", city_name, target_date, exc_info=True)
-            return []
+        # Group markets by date
+        from collections import defaultdict
+        markets_by_date: dict[str, list] = defaultdict(list)
+        for mkt in markets:
+            mkt_date = self._extract_date_from_ticker(mkt.get("ticker", ""))
+            if mkt_date is None:
+                mkt_date = target_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            markets_by_date[mkt_date].append(mkt)
 
-        # --- Evaluate each market ---
         opportunities: list[dict] = []
 
-        for mkt in markets:
-            ticker = mkt.get("ticker", "")
-            rules = mkt.get("rules_primary", "") or mkt.get("rules", "")
-
-            strike_type, strike_low, strike_high = self.parse_strike(ticker, rules)
-            if strike_type == "unknown":
-                logger.debug("Skipping unparseable ticker %s", ticker)
+        for date_key, date_markets in markets_by_date.items():
+            # Get forecast for this specific date
+            try:
+                mean, std = self.engine.get_forecast_temp(city, date_key)
+            except Exception:
+                logger.error("Forecast failed for %s on %s, skipping date", city_name, date_key)
                 continue
 
-            # Model probability for YES outcome
-            if strike_type == "between":
-                strike_value = (strike_low + strike_high) / 2.0
-            else:
-                strike_value = strike_low
-            model_prob, _ = self.engine.evaluate_strike_ensemble(city, target_date, strike_type, strike_value)
+            for mkt in date_markets:
+                ticker = mkt.get("ticker", "")
+                rules = mkt.get("rules_primary", "") or mkt.get("rules", "")
 
-            # Market prices (dollars as probability, e.g. 0.0500 = 5%)
-            yes_bid = float(mkt.get("yes_bid_dollars", 0) or 0)
-            yes_ask = float(mkt.get("yes_ask_dollars", 0) or 0)
-            no_bid = float(mkt.get("no_bid_dollars", 0) or 0)
-            no_ask = float(mkt.get("no_ask_dollars", 0) or 0)
+                strike_type, strike_low, strike_high = self.parse_strike(ticker, rules)
+                if strike_type == "unknown":
+                    logger.debug("Skipping unparseable ticker %s", ticker)
+                    continue
 
-            # Skip markets with no valid quotes
-            if yes_bid == 0 and yes_ask == 0:
-                logger.debug("No quotes for %s, skipping", ticker)
-                continue
+                # Model probability for YES outcome
+                if strike_type == "between":
+                    strike_value = (strike_low + strike_high) / 2.0
+                else:
+                    strike_value = strike_low
+                model_prob, _ = self.engine.evaluate_strike_ensemble(city, date_key, strike_type, strike_value)
 
-            # Mid price as market-implied probability
-            market_mid = (yes_bid + yes_ask) / 2.0 if yes_ask > 0 else yes_bid
+                # Market prices (dollars as probability, e.g. 0.0500 = 5%)
+                yes_bid = float(mkt.get("yes_bid_dollars", 0) or 0)
+                yes_ask = float(mkt.get("yes_ask_dollars", 0) or 0)
+                no_bid = float(mkt.get("no_bid_dollars", 0) or 0)
+                no_ask = float(mkt.get("no_ask_dollars", 0) or 0)
 
-            # Edge against execution price (ask), not midpoint
-            if model_prob > yes_ask and yes_ask > 0:
-                side = "YES"
-                edge = model_prob - yes_ask
-                suggested_price = min(model_prob, yes_ask)
-            elif (1.0 - model_prob) > no_ask and no_ask > 0:
-                side = "NO"
-                edge = (1.0 - model_prob) - no_ask
-                suggested_price = min(1.0 - model_prob, no_ask)
-            else:
-                # No edge on either side
-                continue
+                # Skip markets with no valid quotes
+                if yes_bid == 0 and yes_ask == 0:
+                    logger.debug("No quotes for %s, skipping", ticker)
+                    continue
 
-            suggested_price_cents = max(1, min(99, round(suggested_price * 100)))
+                # Mid price as market-implied probability
+                market_mid = (yes_bid + yes_ask) / 2.0 if yes_ask > 0 else yes_bid
 
-            opportunities.append({
-                "ticker": ticker,
-                "city": city_name,
-                "strike_type": strike_type,
-                "strike_low": strike_low,
-                "strike_high": strike_high,
-                "model_prob": round(model_prob, 4),
-                "market_mid": round(market_mid, 4),
-                "yes_bid": round(yes_bid, 4),
-                "yes_ask": round(yes_ask, 4),
-                "edge": round(edge, 4),
-                "side": side,
-                "suggested_price_cents": suggested_price_cents,
-                "forecast_mean": round(mean, 1),
-                "forecast_std": round(std, 1),
-            })
+                # Edge against execution price (ask), not midpoint
+                if model_prob > yes_ask and yes_ask > 0:
+                    side = "YES"
+                    edge = model_prob - yes_ask
+                    suggested_price = min(model_prob, yes_ask)
+                elif (1.0 - model_prob) > no_ask and no_ask > 0:
+                    side = "NO"
+                    edge = (1.0 - model_prob) - no_ask
+                    suggested_price = min(1.0 - model_prob, no_ask)
+                else:
+                    # No edge on either side
+                    continue
+
+                suggested_price_cents = max(1, min(99, round(suggested_price * 100)))
+
+                opportunities.append({
+                    "ticker": ticker,
+                    "city": city_name,
+                    "strike_type": strike_type,
+                    "strike_low": strike_low,
+                    "strike_high": strike_high,
+                    "model_prob": round(model_prob, 4),
+                    "market_mid": round(market_mid, 4),
+                    "yes_bid": round(yes_bid, 4),
+                    "yes_ask": round(yes_ask, 4),
+                    "edge": round(edge, 4),
+                    "side": side,
+                    "suggested_price_cents": suggested_price_cents,
+                    "forecast_mean": round(mean, 1),
+                    "forecast_std": round(std, 1),
+                })
 
         # Sort by edge descending
         opportunities.sort(key=lambda x: x["edge"], reverse=True)

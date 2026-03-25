@@ -6,11 +6,17 @@ as pandas DataFrames for backtesting and feature engineering.
 """
 
 import logging
+import warnings
 from datetime import datetime
 from typing import Optional
 
 import ccxt
 import pandas as pd
+
+warnings.warn(
+    "binance_rest.py is deprecated — Binance is geo-blocked in the US.",
+    DeprecationWarning, stacklevel=2,
+)
 
 logger = logging.getLogger(__name__)
 

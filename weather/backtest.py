@@ -182,6 +182,12 @@ class WeatherBacktest:
         dict
             Backtest results summary.
         """
+        logger.warning(
+            "NOTE: This backtest uses simulated forecasts (actual_temp + noise). "
+            "Results are indicative only — they leak the actual outcome into the forecast. "
+            "Real-world accuracy will be lower."
+        )
+
         markets = self.fetch_settled_markets(series_ticker)
         if not markets:
             return {

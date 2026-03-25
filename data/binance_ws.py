@@ -8,9 +8,16 @@ Maintains a local order book and routes events to registered callbacks.
 import asyncio
 import json
 import logging
+import warnings
 from typing import Callable, Optional
 
 import websockets
+
+warnings.warn(
+    "binance_ws.py is deprecated — Binance is geo-blocked in the US. "
+    "Use coinbase_ws.py or coinbase_auth_ws.py instead.",
+    DeprecationWarning, stacklevel=2,
+)
 
 from config.settings import settings
 

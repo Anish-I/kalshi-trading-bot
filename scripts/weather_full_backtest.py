@@ -206,6 +206,12 @@ def run_backtest():
         log.info("  %s: %d trades, %d wins (%.1f%%), P&L=$%.2f/contract",
                  city["short"], city_trades, city_wins, wr, city_pnl)
 
+    log.warning(
+        "NOTE: This backtest uses simulated forecasts (actual_temp + noise). "
+        "Results are indicative only — they leak the actual outcome into the forecast. "
+        "Real-world accuracy will be lower."
+    )
+
     # Overall summary
     sep = "=" * 65
     print(f"\n{sep}")

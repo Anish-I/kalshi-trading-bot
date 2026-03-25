@@ -4,6 +4,13 @@ import asyncio
 import logging
 import signal
 import sys
+import warnings
+
+warnings.warn(
+    "paper_trade.py is deprecated — uses Binance paths. "
+    "Use scripts/crypto_ml_trader.py instead.",
+    DeprecationWarning, stacklevel=2,
+)
 
 sys.path.insert(0, ".")
 
