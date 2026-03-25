@@ -48,18 +48,18 @@ class MomentumModel:
     def score(self, features: dict) -> tuple[str, float]:
         signals = 0
 
-        # 5-min return
+        # 5-min return (optimized: wider threshold)
         m5 = features.get("momentum_5m", 0) or 0
-        if m5 > 0.001:
+        if m5 > 0.002:
             signals += 1
-        elif m5 < -0.001:
+        elif m5 < -0.002:
             signals -= 1
 
-        # 10-min return
+        # 10-min return (optimized: wider)
         m10 = features.get("momentum_10m", 0) or 0
-        if m10 > 0.002:
+        if m10 > 0.003:
             signals += 1
-        elif m10 < -0.002:
+        elif m10 < -0.003:
             signals -= 1
 
         # Price vs VWAP
@@ -69,11 +69,11 @@ class MomentumModel:
         elif vwap_dev < -0.001:
             signals -= 1
 
-        # Donchian position
+        # Donchian position (optimized: need more extreme)
         donch = features.get("donchian_position", 0.5) or 0.5
-        if donch > 0.7:
+        if donch > 0.8:
             signals += 1
-        elif donch < 0.3:
+        elif donch < 0.2:
             signals -= 1
 
         # EMA 9 slope
@@ -83,10 +83,10 @@ class MomentumModel:
         elif ema_s < -0.0001:
             signals -= 1
 
-        # 5 sub-signals, need 3+ for a directional call
-        if signals >= 3:
+        # Need 4/5 signals for higher selectivity (was 3/5)
+        if signals >= 4:
             return "up", min(0.80, 0.55 + signals * 0.05)
-        if signals <= -3:
+        if signals <= -4:
             return "down", min(0.80, 0.55 + abs(signals) * 0.05)
         return "flat", 0.50
 
@@ -100,33 +100,33 @@ class MeanReversionModel:
     def score(self, features: dict) -> tuple[str, float]:
         signals = 0
 
-        # RSI extremes
+        # RSI extremes (optimized: rsi_lo=25, rsi_hi=80)
         rsi = features.get("rsi_14", 50) or 50
-        if rsi < 30:
+        if rsi < 25:
             signals += 2
-        elif rsi < 40:
+        elif rsi < 35:
             signals += 1
+        elif rsi > 80:
+            signals -= 2
         elif rsi > 70:
-            signals -= 2
-        elif rsi > 60:
             signals -= 1
 
-        # Bollinger Band position
-        bb = features.get("bb_position", 0.5) or 0.5
-        if bb < 0.1:
+        # Donchian position as proxy for BB (optimized: donch_lo=0.25)
+        donch = features.get("donchian_position", 0.5) or 0.5
+        if donch < 0.25:
             signals += 2
-        elif bb < 0.2:
+        elif donch < 0.35:
             signals += 1
-        elif bb > 0.9:
+        elif donch > 0.75:
             signals -= 2
-        elif bb > 0.8:
+        elif donch > 0.65:
             signals -= 1
 
-        # Stochastic %K
+        # Stochastic %K (optimized: stoch_lo=10)
         stoch = features.get("stoch_k", 50) or 50
-        if stoch < 20:
+        if stoch < 10:
             signals += 1
-        elif stoch > 80:
+        elif stoch > 90:
             signals -= 1
 
         # Volume spike amplifies signal
