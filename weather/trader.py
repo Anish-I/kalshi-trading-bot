@@ -33,7 +33,7 @@ class WeatherTrader:
         self.position_manager = PositionManager()
 
         # --- Resting order tracking ---
-        self._resting_orders: dict[str, str] = {}  # ticker -> order_id
+        self._resting_orders: dict[str, tuple] = {}  # ticker -> (order_id, side, count, price)
 
         # --- Weather data sources ---
         self.nws_client = NWSClient(user_agent=settings.NWS_USER_AGENT)
@@ -67,17 +67,22 @@ class WeatherTrader:
 
     def check_resting_orders(self) -> None:
         resolved = []
-        for ticker, order_id in self._resting_orders.items():
+        for ticker, (order_id, side, count, price) in self._resting_orders.items():
             try:
                 resp = self.kalshi_client._request("GET", f"/portfolio/orders/{order_id}")
                 order_data = resp.get("order", resp)
                 status = order_data.get("status", "")
                 if status == "executed":
+                    # NOW open the position since it filled
+                    self.position_manager.open_position(
+                        ticker=ticker, side=side, count=count, entry_price_cents=price,
+                    )
                     resolved.append(ticker)
-                    logger.info("Weather resting order FILLED: %s", ticker)
+                    logger.info("Weather resting order FILLED + position opened: %s %s x%d @ %dc",
+                                ticker, side, count, price)
                 elif status in ("canceled", "expired"):
                     resolved.append(ticker)
-                    logger.info("Weather resting order %s: %s — position NOT opened", status, ticker)
+                    logger.info("Weather resting order %s: %s — no position", status, ticker)
             except Exception:
                 pass
         for t in resolved:
@@ -207,7 +212,7 @@ class WeatherTrader:
                     entry_price_cents=price_cents,
                 )
             elif status == "resting" and order_id:
-                self._resting_orders[ticker] = order_id
+                self._resting_orders[ticker] = (order_id, side, contracts_per_trade, price_cents)
                 logger.info("Weather order resting: %s (%s)", ticker, order_id)
 
             executed.append({

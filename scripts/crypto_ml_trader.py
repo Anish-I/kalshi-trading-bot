@@ -30,6 +30,7 @@ from models.signal_models import (
     XGBoostModel, MomentumModel, MeanReversionModel,
     KalshiConsensusModel, vote,
 )
+from models.trade_journal import TradeJournal
 
 logging.basicConfig(
     level=logging.INFO,
@@ -150,6 +151,9 @@ def check_resting_orders(c):
         resting_orders.pop(t, None)
 
 
+_journal: TradeJournal | None = None  # set in main()
+
+
 def check_settlements(c):
     global daily_pnl, win_count, loss_count, settled_tickers
     try:
@@ -176,6 +180,10 @@ def check_settlements(c):
             settled_tickers.add(ticker)
             log.info("SETTLED [%s] %s %s x%d pnl=%+dc total=%+dc",
                       "WIN" if won else "LOSS", ticker, side, ct, pnl, daily_pnl)
+            # Feed outcome back to journal
+            if _journal is not None:
+                _journal.log_outcome(ticker, won, pnl)
+                _journal.save()
     except Exception:
         pass
 
@@ -200,10 +208,16 @@ def main():
     momentum_model = MomentumModel()
     meanrev_model = MeanReversionModel()
     kalshi_model = KalshiConsensusModel()
+    global _journal
+    journal = TradeJournal(settings.DATA_DIR)
+    _journal = journal
 
     c = KalshiClient()
     tracker = KXBTCMarketTracker(c)
     log.info("Balance: $%.2f", c.get_balance())
+    log.info("Journal: %d entries, weights=%s",
+             len(journal.entries),
+             {k: f"{v:.2f}" for k, v in journal.get_model_weights().items()})
 
     global traded_tickers, daily_pnl, trade_count, win_count, loss_count, last_reset_date, resting_orders
     scan_count = 0
@@ -265,12 +279,13 @@ def main():
             velocity = get_price_velocity(ticker, market_mid)
             kalshi_vote, kalshi_conf = kalshi_model.score(kalshi_imb, velocity, market_mid)
 
-            # --- Vote ---
+            # --- Vote with adaptive weights ---
+            weights = journal.get_model_weights()
             all_votes = [
-                (xgb_vote, xgb_conf),
-                (mom_vote, mom_conf),
-                (mr_vote, mr_conf),
-                (kalshi_vote, kalshi_conf),
+                (xgb_vote, xgb_conf * weights.get("xgboost", 1.0)),
+                (mom_vote, mom_conf * weights.get("momentum", 1.0)),
+                (mr_vote, mr_conf * weights.get("mean_reversion", 1.0)),
+                (kalshi_vote, kalshi_conf * weights.get("kalshi_consensus", 1.0)),
             ]
             direction, combined_conf, agreement = vote(all_votes)
 
@@ -329,6 +344,7 @@ def main():
                 "trades_today": trade_count,
                 "wins": win_count,
                 "losses": loss_count,
+                "model_weights": {k: round(v, 2) for k, v in weights.items()},
                 "daily_pnl_cents": daily_pnl,
                 "balance": round(c.get_balance(), 2) if scan_count % 10 == 0 else None,
             }
@@ -344,6 +360,20 @@ def main():
                 market_mid * 100,
                 edge * 100 if side else 0,
                 action, win_count, loss_count, daily_pnl / 100,
+            )
+
+            # --- Journal every decision ---
+            models_dict = {
+                "xgboost": {"vote": xgb_vote.upper(), "confidence": round(xgb_conf * 100, 1)},
+                "momentum": {"vote": mom_vote.upper(), "confidence": round(mom_conf * 100, 1)},
+                "mean_reversion": {"vote": mr_vote.upper(), "confidence": round(mr_conf * 100, 1)},
+                "kalshi_consensus": {"vote": kalshi_vote.upper(), "confidence": round(kalshi_conf * 100, 1)},
+            }
+            journal.log_decision(
+                ticker=ticker, btc_price=btc or 0, models=models_dict,
+                vote_result=direction.upper(), agreement=agreement, action=action,
+                side=side, edge=round(edge, 4) if side else None,
+                features_snapshot=last_row if last_row else None,
             )
 
             # --- Execute trade ---
@@ -381,6 +411,12 @@ def main():
                             resting_orders[ticker] = order_id
                         traded_tickers.add(ticker)
 
+                    # Update journal with execution details
+                    journal.entries[-1]["entry_price"] = price_cents
+                    journal.entries[-1]["contracts"] = contracts
+                    journal.entries[-1]["bet_dollars"] = bet_dollars
+                    journal.save()
+
                     # Write notification for dashboard
                     notif = {
                         "type": "trade",
@@ -405,6 +441,10 @@ def main():
                 except Exception as e:
                     log.error("    Order FAILED: %s", e)
 
+            # Save journal periodically
+            if scan_count % 10 == 0:
+                journal.save()
+
             time.sleep(SCAN_INTERVAL)
 
         except KeyboardInterrupt:
@@ -413,8 +453,11 @@ def main():
             log.exception("Scan error")
             time.sleep(10)
 
+    journal.save()
+    stats = journal.get_stats()
     log.info("Shutdown. %d trades, W%d/L%d, pnl=$%.2f",
              trade_count, win_count, loss_count, daily_pnl / 100)
+    log.info("Journal stats: %s", stats)
 
 
 if __name__ == "__main__":

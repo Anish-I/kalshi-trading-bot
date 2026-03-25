@@ -62,6 +62,13 @@ def run_cycle(trader: WeatherTrader) -> None:
     cycle_start = datetime.now(timezone.utc).isoformat()
     logger.info("=== Cycle start: %s ===", cycle_start)
 
+    # 0. Daily reset + resting order reconciliation
+    try:
+        trader.daily_reset_if_needed()
+        trader.check_resting_orders()
+    except Exception:
+        logger.error("Pre-cycle checks failed", exc_info=True)
+
     # 1. Check settlements on existing positions
     try:
         settled = trader.check_settlements()
