@@ -2,8 +2,11 @@
 Crypto ML Trader: Uses retrained XGBoost model with microstructure features
 to trade BTC 15-min markets on Kalshi. Small bets, strong edges only.
 
+Writes live state to D:/kalshi-data/ml_trader_state.json for dashboard.
+
 Run: python scripts/crypto_ml_trader.py
 """
+import json
 import sys
 import time
 import logging
@@ -30,16 +33,19 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("ml_trader")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Config
-MAX_CONTRACTS = 5
-CONFIDENCE_THRESHOLD = 0.58  # model must be >58% confident in direction
-MAX_ENTRY_PRICE = 0.62       # allow up to 62c if model is very confident
+MAX_CONTRACTS = 30
+CONFIDENCE_THRESHOLD = 0.58
+MAX_ENTRY_PRICE = 0.62
 SCAN_INTERVAL = 30
-DAILY_LOSS_LIMIT_CENTS = 500  # $5
-MODEL_PATH = "D:/kalshi-models/xgb_deploy_20260325_060009.json"
+DAILY_LOSS_LIMIT_CENTS = 500
+MODEL_PATH = "D:/kalshi-models/xgb_balanced_20260325_210315.json"
+STATE_FILE = Path(settings.DATA_DIR) / "ml_trader_state.json"
 
 traded_tickers: set = set()
+settled_tickers: set = set()
 daily_pnl = 0
 trade_count = 0
 win_count = 0
@@ -47,10 +53,9 @@ loss_count = 0
 
 
 def load_model():
-    """Load the retrained XGBoost model as Booster."""
     booster = xgb.Booster()
     booster.load_model(MODEL_PATH)
-    log.info("Loaded XGBoost Booster from %s", MODEL_PATH)
+    log.info("Loaded model from %s", MODEL_PATH)
     return booster
 
 
@@ -62,8 +67,7 @@ def get_btc_price():
         return None
 
 
-def load_latest_features() -> pd.DataFrame | None:
-    """Load latest feature row from parquet."""
+def load_latest_features():
     feat_dir = Path(settings.DATA_DIR) / "features"
     if not feat_dir.exists():
         return None
@@ -72,142 +76,229 @@ def load_latest_features() -> pd.DataFrame | None:
         return None
     try:
         df = pd.read_parquet(files[-1])
-        if len(df) < 5:
-            return None
-        return df
+        return df if len(df) >= 5 else None
     except Exception:
         return None
 
 
-def predict_direction(booster: xgb.Booster, features_df: pd.DataFrame) -> tuple[str, float]:
-    """Run model inference on latest features.
-
-    Returns: (direction, confidence)
-        direction: "up", "down", or "flat"
-        confidence: probability of the predicted direction
-    """
+def predict_direction(booster, features_df):
     exclude = {"timestamp", "btc_price", "label"}
     feature_cols = [c for c in features_df.columns if c not in exclude]
-
     X = features_df[feature_cols].iloc[-1:].replace([np.inf, -np.inf], np.nan).fillna(0).astype(np.float32)
     dmat = xgb.DMatrix(X)
-
-    # Predict probabilities: [p_down, p_flat, p_up] (classes 0,1,2)
     proba = booster.predict(dmat)[0]
     p_down, p_flat, p_up = float(proba[0]), float(proba[1]), float(proba[2])
 
     if p_up > p_down and p_up > p_flat:
-        return "up", p_up
+        return "up", p_up, (p_down, p_flat, p_up)
     elif p_down > p_up and p_down > p_flat:
-        return "down", p_down
+        return "down", p_down, (p_down, p_flat, p_up)
     else:
-        return "flat", p_flat
+        return "flat", p_flat, (p_down, p_flat, p_up)
+
+
+def check_settlements(c):
+    """Check for new settlements and update P&L."""
+    global daily_pnl, win_count, loss_count, settled_tickers
+    try:
+        result = c._request("GET", "/portfolio/settlements", params={"limit": 10})
+        for s in result.get("settlements", []):
+            ticker = s.get("ticker", "")
+            if ticker in settled_tickers or ticker not in traded_tickers:
+                continue
+
+            yes_ct = float(s.get("yes_count_fp", "0"))
+            no_ct = float(s.get("no_count_fp", "0"))
+            side = "YES" if yes_ct > 0 else "NO"
+            cost = s.get("yes_total_cost", 0) if side == "YES" else s.get("no_total_cost", 0)
+            ct = int(yes_ct if side == "YES" else no_ct)
+            mkt_result = s.get("market_result", "")
+            won = (side == "YES" and mkt_result == "yes") or (side == "NO" and mkt_result == "no")
+            pnl = (ct * 100 - cost) if won else -cost
+
+            daily_pnl += pnl
+            if won:
+                win_count += 1
+            else:
+                loss_count += 1
+            settled_tickers.add(ticker)
+
+            mark = "WIN" if won else "LOSS"
+            log.info(
+                "  SETTLED [%s] %s %s x%d pnl=%+dc total_pnl=%+dc",
+                mark, ticker, side, ct, pnl, daily_pnl,
+            )
+    except Exception:
+        pass
+
+
+def write_state(state):
+    """Write current state to JSON for dashboard."""
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.write_text(json.dumps(state, default=str))
+    except Exception:
+        pass
 
 
 def main():
     log.info("=" * 55)
-    log.info("  CRYPTO ML TRADER — XGBoost with Microstructure")
+    log.info("  CRYPTO ML TRADER v2 — Live State + Settlement Tracking")
     log.info("  Model: %s", MODEL_PATH)
-    log.info("  Confidence threshold: %.0f%%", CONFIDENCE_THRESHOLD * 100)
-    log.info("  Max contracts: %d | Max entry: %dc", MAX_CONTRACTS, int(MAX_ENTRY_PRICE * 100))
     log.info("=" * 55)
 
     model = load_model()
     c = KalshiClient()
     tracker = KXBTCMarketTracker(c)
-
     bal = c.get_balance()
     log.info("Balance: $%.2f", bal)
 
     global traded_tickers, daily_pnl, trade_count, win_count, loss_count
     scan_count = 0
-    last_status = time.time()
 
     while True:
         try:
             scan_count += 1
-            market = tracker.get_next_market()
 
+            # Check settlements every cycle
+            check_settlements(c)
+
+            market = tracker.get_next_market()
             if not market:
+                write_state({"time": datetime.now(timezone.utc).isoformat(), "status": "no_market"})
                 time.sleep(SCAN_INTERVAL)
                 continue
 
             remaining = tracker.get_market_time_remaining(market)
             ticker = market["ticker"]
-
-            # Only trade 2-13 min before close
-            if remaining < 120 or remaining > 780:
-                time.sleep(SCAN_INTERVAL)
-                continue
-
-            # Already traded this market
-            if ticker in traded_tickers:
-                time.sleep(SCAN_INTERVAL)
-                continue
-
-            # Daily loss limit
-            if daily_pnl <= -DAILY_LOSS_LIMIT_CENTS:
-                if time.time() - last_status > 300:
-                    log.warning("Daily loss limit hit ($%.2f). Sitting out.", daily_pnl / 100)
-                    last_status = time.time()
-                time.sleep(SCAN_INTERVAL)
-                continue
-
-            # Load features
-            features_df = load_latest_features()
-            if features_df is None:
-                time.sleep(SCAN_INTERVAL)
-                continue
-
-            # Model prediction
-            direction, confidence = predict_direction(model, features_df)
-            btc = get_btc_price()
-
-            # Get market prices
             yes_ask = float(market.get("yes_ask_dollars", 0))
             no_ask = float(market.get("no_ask_dollars", 0))
             yes_bid = float(market.get("yes_bid_dollars", 0))
-            no_bid = float(market.get("no_bid_dollars", 0))
+            btc = get_btc_price()
 
-            # Decide trade
+            # --- Kalshi orderbook features ---
+            kalshi_signal = 0  # -1 bearish, 0 neutral, +1 bullish
+            kalshi_imbalance = 0.0
+            try:
+                ob = c.get_orderbook(ticker, depth=10)
+                ob_data = ob.get("orderbook_fp", ob.get("orderbook", {}))
+                yes_levels = ob_data.get("yes_dollars", [])
+                no_levels = ob_data.get("no_dollars", [])
+
+                yes_depth = sum(float(lvl[1]) for lvl in yes_levels)
+                no_depth = sum(float(lvl[1]) for lvl in no_levels)
+                total_depth = yes_depth + no_depth
+
+                if total_depth > 0:
+                    # Imbalance: positive = more YES bids = bullish sentiment
+                    kalshi_imbalance = (yes_depth - no_depth) / total_depth
+
+                    # Strong signal when one side dominates
+                    if kalshi_imbalance > 0.3:
+                        kalshi_signal = 1  # market leans UP
+                    elif kalshi_imbalance < -0.3:
+                        kalshi_signal = -1  # market leans DOWN
+            except Exception:
+                pass
+
+            # --- Market price momentum (compare to 50/50 baseline) ---
+            market_mid = (yes_bid + yes_ask) / 2 if yes_ask > 0 else 0.5
+            market_lean = "up" if market_mid > 0.55 else "down" if market_mid < 0.45 else "neutral"
+
+            # --- Load ML features + predict ---
+            features_df = load_latest_features()
+            direction, confidence, probs = "flat", 0.5, (0.33, 0.34, 0.33)
+            if features_df is not None:
+                direction, confidence, probs = predict_direction(model, features_df)
+
+            # --- Combine ML model + Kalshi orderbook signal ---
+            # Boost confidence when Kalshi orderbook agrees with model
+            # Reduce confidence when they disagree
+            combined_confidence = confidence
+            if (direction == "up" and kalshi_signal > 0) or (direction == "down" and kalshi_signal < 0):
+                combined_confidence = min(0.99, confidence + 0.05)  # agreement bonus
+            elif (direction == "up" and kalshi_signal < 0) or (direction == "down" and kalshi_signal > 0):
+                combined_confidence = max(0.40, confidence - 0.10)  # disagreement penalty
+
+            # Determine action
+            action = "monitoring"
             side = None
             entry = 0.0
             edge = 0.0
 
-            if direction == "up" and confidence >= CONFIDENCE_THRESHOLD:
-                if yes_ask <= MAX_ENTRY_PRICE and yes_ask > 0:
-                    side = "yes"
-                    entry = yes_ask
-                    edge = confidence - yes_ask
+            if ticker in traded_tickers:
+                action = "already_traded"
+            elif remaining < 120 or remaining > 780:
+                action = "outside_window"
+            elif daily_pnl <= -DAILY_LOSS_LIMIT_CENTS:
+                action = "loss_limit_hit"
+            elif direction == "up" and combined_confidence >= CONFIDENCE_THRESHOLD and 0 < yes_ask <= MAX_ENTRY_PRICE:
+                side = "yes"
+                entry = yes_ask
+                edge = combined_confidence - yes_ask
+                if edge > 0.03:
+                    action = "trading"
+            elif direction == "down" and combined_confidence >= CONFIDENCE_THRESHOLD and 0 < no_ask <= MAX_ENTRY_PRICE:
+                side = "no"
+                entry = no_ask
+                edge = combined_confidence - no_ask
+                if edge > 0.03:
+                    action = "trading"
 
-            elif direction == "down" and confidence >= CONFIDENCE_THRESHOLD:
-                if no_ask <= MAX_ENTRY_PRICE and no_ask > 0:
-                    side = "no"
-                    entry = no_ask
-                    edge = confidence - no_ask
+            if action != "trading" and side:
+                action = "no_edge"
 
-            # Status every 5 min
-            if time.time() - last_status > 300:
-                log.info(
-                    "Scan #%d | %s %ds | %s %.0f%% | BTC=$%s | trades=%d W=%d L=%d pnl=$%.2f",
-                    scan_count, ticker, int(remaining),
-                    direction.upper(), confidence * 100,
-                    f"{btc:,.2f}" if btc else "?",
-                    trade_count, win_count, loss_count, daily_pnl / 100,
-                )
-                last_status = time.time()
+            # Write state for dashboard
+            state = {
+                "time": datetime.now(timezone.utc).isoformat(),
+                "scan": scan_count,
+                "ticker": ticker,
+                "remaining_s": int(remaining),
+                "btc_price": btc,
+                "prediction": direction.upper(),
+                "confidence": round(confidence * 100, 1),
+                "p_down": round(probs[0] * 100, 1),
+                "p_flat": round(probs[1] * 100, 1),
+                "p_up": round(probs[2] * 100, 1),
+                "yes_ask": yes_ask,
+                "no_ask": no_ask,
+                "edge": round(edge * 100, 1) if side else 0,
+                "kalshi_imbalance": round(kalshi_imbalance, 3),
+                "kalshi_signal": kalshi_signal,
+                "market_lean": market_lean,
+                "combined_confidence": round(combined_confidence * 100, 1),
+                "action": action,
+                "trades_today": trade_count,
+                "wins": win_count,
+                "losses": loss_count,
+                "daily_pnl_cents": daily_pnl,
+                "balance": round(c.get_balance(), 2) if scan_count % 10 == 0 else None,
+            }
+            write_state(state)
 
-            # Execute trade if edge exists
-            if side and edge > 0.03:
+            # Log every scan (concise)
+            kalshi_arrow = "+" if kalshi_signal > 0 else "-" if kalshi_signal < 0 else "="
+            log.info(
+                "%s | %s %.0f%%→%.0f%% | BTC=$%s | mkt=%.0fc kalshi=%s%.0f%% | edge=%.0f%% | %s | W%d/L%d $%.2f",
+                ticker[-8:], direction.upper(), confidence * 100, combined_confidence * 100,
+                f"{btc:,.0f}" if btc else "?",
+                market_mid * 100, kalshi_arrow, abs(kalshi_imbalance) * 100,
+                edge * 100 if side else 0,
+                action, win_count, loss_count, daily_pnl / 100,
+            )
+
+            # Execute trade
+            if action == "trading" and side:
                 price_cents = int(entry * 100)
-                # Target ~$3 per trade: contracts = 300 / price_cents
-                contracts = max(1, min(MAX_CONTRACTS, 300 // price_cents))
+                # Scale bet by confidence: $3 at 58%, up to $15 at 90%+
+                bet_dollars = min(15, max(3, int((confidence - 0.50) * 50)))
+                bet_cents = bet_dollars * 100
+                contracts = max(1, min(MAX_CONTRACTS, bet_cents // price_cents))
 
                 log.info(
-                    ">>> TRADE: %s %s @ %dc x%d | model=%s %.1f%% | edge=%.0f%% | BTC=$%s",
+                    ">>> TRADE: %s %s @ %dc x%d | conf=%.0f%% edge=%.0f%%",
                     side.upper(), ticker, price_cents, contracts,
-                    direction, confidence * 100, edge * 100,
-                    f"{btc:,.2f}" if btc else "?",
+                    confidence * 100, edge * 100,
                 )
 
                 try:
@@ -221,8 +312,7 @@ def main():
                                               no_price=price_cents)
 
                     status = order.get("order", order).get("status", "?")
-                    log.info("    Order: %s | Balance: $%.2f", status, c.get_balance())
-
+                    log.info("    Order: %s", status)
                     traded_tickers.add(ticker)
                     trade_count += 1
 
@@ -237,7 +327,7 @@ def main():
             log.exception("Scan error")
             time.sleep(10)
 
-    log.info("Shutting down. Trades: %d", trade_count)
+    log.info("Shutdown. %d trades, %dW/%dL, pnl=$%.2f", trade_count, win_count, loss_count, daily_pnl / 100)
 
 
 if __name__ == "__main__":

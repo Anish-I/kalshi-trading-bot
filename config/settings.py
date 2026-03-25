@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     WEATHER_MAX_CONTRACTS: int = 25
     WEATHER_SCAN_INTERVAL_MINUTES: int = 15
 
+    # Coinbase CDP API Key (for authenticated WebSocket)
+    COINBASE_CDP_KEY_ID: str = ""
+    COINBASE_CDP_PRIVATE_KEY: str = ""
+
     model_config = {"env_file": str(_PROJECT_ROOT / ".env"), "env_file_encoding": "utf-8"}
 
 

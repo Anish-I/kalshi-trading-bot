@@ -9,14 +9,18 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import json
+
 from kalshi.client import KalshiClient
 from dashboard.bot_manager import BotManager
+from config.settings import settings
 
 app = FastAPI(title="Kalshi Trading Dashboard")
 kalshi = KalshiClient()
 bots = BotManager()
 
 STATIC_DIR = Path(__file__).parent / "static"
+DATA_DIR = Path(settings.DATA_DIR)
 
 
 @app.get("/")
@@ -143,3 +147,26 @@ def stop_bot(name: str):
 @app.post("/api/bots/{name}/restart")
 def restart_bot(name: str):
     return bots.restart(name)
+
+
+@app.get("/api/logs")
+def get_logs():
+    """Return live state from both traders."""
+    crypto_state = {}
+    weather_state = {}
+
+    try:
+        f = DATA_DIR / "ml_trader_state.json"
+        if f.exists():
+            crypto_state = json.loads(f.read_text())
+    except Exception:
+        pass
+
+    try:
+        f = DATA_DIR / "weather_trader_state.json"
+        if f.exists():
+            weather_state = json.loads(f.read_text())
+    except Exception:
+        pass
+
+    return {"crypto": crypto_state, "weather": weather_state}

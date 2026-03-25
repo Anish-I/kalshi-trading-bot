@@ -76,6 +76,22 @@
 </div>
 
 <div class="section">
+  <div class="section-title">Model Thinking</div>
+  <div id="model-thinking">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div>
+        <div style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Crypto ML Trader</div>
+        <div id="crypto-thinking" style="font-size:13px;">Waiting for data...</div>
+      </div>
+      <div>
+        <div style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Weather Trader</div>
+        <div id="weather-thinking" style="font-size:13px;">Waiting for data...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
   <div class="section-title">Open Positions</div>
   <table>
     <thead><tr><th>Ticker</th><th>Side</th><th>Ct</th><th>Exposure</th><th>P&L</th><th>Updated</th></tr></thead>
@@ -191,6 +207,50 @@ async function refresh() {
         `).join('')
       : '<tr><td colspan="6" style="color:#8b949e">No trades yet</td></tr>';
     document.getElementById('trades-body').innerHTML = trHtml;
+
+    // Model thinking
+    try {
+      const logsRes = await fetch('/api/logs').then(r => r.json());
+      const cr = logsRes.crypto || {};
+      const wr = logsRes.weather || {};
+
+      if (cr.prediction) {
+        const arrow = cr.prediction === 'UP' ? '&#9650;' : cr.prediction === 'DOWN' ? '&#9660;' : '&#9644;';
+        const color = cr.prediction === 'UP' ? '#3fb950' : cr.prediction === 'DOWN' ? '#f85149' : '#8b949e';
+        const actionColor = cr.action === 'trading' ? '#3fb950' : cr.action === 'monitoring' ? '#d29922' : '#8b949e';
+
+        const confBar = `<div style="background:#21262d;border-radius:4px;height:8px;margin:6px 0;position:relative;">` +
+          `<div style="background:${color};height:100%;border-radius:4px;width:${cr.confidence}%;"></div></div>`;
+
+        document.getElementById('crypto-thinking').innerHTML = `
+          <div style="font-size:20px;color:${color};margin-bottom:4px;">${arrow} ${cr.prediction} <span style="font-size:14px;">${cr.confidence}%</span></div>
+          ${confBar}
+          <div style="color:#8b949e;font-size:12px;">
+            Down ${cr.p_down}% | Flat ${cr.p_flat}% | Up ${cr.p_up}%<br>
+            BTC: $${cr.btc_price ? cr.btc_price.toLocaleString() : '?'}<br>
+            Market: ${cr.ticker || '?'} (${cr.remaining_s}s left)<br>
+            YES ${(cr.yes_ask*100).toFixed(0)}c / NO ${(cr.no_ask*100).toFixed(0)}c<br>
+            Edge: ${cr.edge}% | <span style="color:${actionColor}">${cr.action}</span><br>
+            Today: ${cr.trades_today} trades | W${cr.wins}/L${cr.losses} | $${(cr.daily_pnl_cents/100).toFixed(2)}
+          </div>
+          <div style="color:#484f58;font-size:11px;margin-top:4px;">${fmtTime(cr.time)}</div>
+        `;
+      }
+
+      if (wr.opportunities !== undefined) {
+        document.getElementById('weather-thinking').innerHTML = `
+          <div style="font-size:16px;margin-bottom:4px;">Opportunities: <span class="blue">${wr.opportunities}</span></div>
+          <div style="color:#8b949e;font-size:12px;">
+            Best edge: ${wr.best_edge ? (wr.best_edge*100).toFixed(0)+'%' : '?'}<br>
+            Best market: ${wr.best_market || '?'}<br>
+            Open positions: ${wr.open_positions || 0}<br>
+            Action: ${wr.last_action || 'scanning'}<br>
+            Balance: $${wr.balance || '?'}
+          </div>
+          <div style="color:#484f58;font-size:11px;margin-top:4px;">${fmtTime(wr.time)}</div>
+        `;
+      }
+    } catch(e) {}
 
     document.getElementById('last-updated').textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
   } catch(e) {

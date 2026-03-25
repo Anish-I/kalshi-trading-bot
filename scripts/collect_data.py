@@ -19,7 +19,18 @@ import numpy as np
 import pandas as pd
 
 from config.settings import settings
-from data.coinbase_ws import CoinbaseCollector
+
+# Use authenticated WebSocket if CDP key available, else fallback to unauthenticated
+_cdp_key = getattr(settings, "COINBASE_CDP_KEY_ID", "") or ""
+_cdp_secret = getattr(settings, "COINBASE_CDP_PRIVATE_KEY", "") or ""
+
+if _cdp_key and _cdp_secret:
+    from data.coinbase_auth_ws import CoinbaseAuthCollector as _Collector
+    _USE_AUTH = True
+else:
+    from data.coinbase_ws import CoinbaseCollector as _Collector  # type: ignore[assignment]
+    _USE_AUTH = False
+
 from data.bar_aggregator import BarAggregator
 from features.pipeline import FeaturePipeline
 
@@ -100,11 +111,24 @@ async def on_trade(trade: dict) -> None:
         last_save_time = time.time()
 
 
-async def on_depth(orderbook: dict) -> None:
+async def on_depth(data: dict) -> None:
     global latest_orderbook, depth_count
-    latest_orderbook = orderbook
     depth_count += 1
-    pipeline.update_orderbook(orderbook)
+
+    # Handle both formats: orderbook dict or ticker dict
+    if "bids" in data and "asks" in data:
+        # Orderbook format from unauthenticated collector
+        latest_orderbook = data
+    elif "best_bid" in data:
+        # Ticker format from authenticated collector — build synthetic orderbook
+        latest_orderbook = {
+            "bids": [[data["best_bid"], 1.0]],
+            "asks": [[data["best_ask"], 1.0]],
+        }
+    else:
+        return
+
+    pipeline.update_orderbook(latest_orderbook)
 
 
 async def on_kline(kline: dict) -> None:
@@ -167,12 +191,26 @@ async def main() -> None:
     log.info("Saving to: %s", settings.DATA_DIR)
     log.info("=" * 50)
 
-    collector = CoinbaseCollector(
-        symbol="BTC-USD",
-        on_trade=on_trade,
-        on_depth=on_depth,
-        on_kline=on_kline,
-    )
+    if settings.COINBASE_CDP_KEY_ID and settings.COINBASE_CDP_PRIVATE_KEY:
+        log.info("Using AUTHENTICATED Coinbase WebSocket (CDP key)")
+        from data.coinbase_auth_ws import CoinbaseAuthCollector
+        collector = CoinbaseAuthCollector(
+            key_id=settings.COINBASE_CDP_KEY_ID,
+            private_key_b64=settings.COINBASE_CDP_PRIVATE_KEY,
+            symbol="BTC-USD",
+            on_trade=on_trade,
+            on_ticker=on_depth,
+            on_kline=on_kline,
+        )
+    else:
+        log.info("Using unauthenticated Coinbase WebSocket (REST orderbook polling)")
+        from data.coinbase_ws import CoinbaseCollector
+        collector = CoinbaseCollector(
+            symbol="BTC-USD",
+            on_trade=on_trade,
+            on_depth=on_depth,
+            on_kline=on_kline,
+        )
 
     try:
         await collector.start()
