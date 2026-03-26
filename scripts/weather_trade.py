@@ -109,6 +109,42 @@ def run_cycle(trader: WeatherTrader) -> None:
     except Exception:
         logger.error("Status report failed", exc_info=True)
 
+    # 5. Write state for dashboard
+    try:
+        import json
+        state = {
+            "time": cycle_start,
+            "opportunities": len(opportunities),
+            "best_edge": round(opportunities[0]["edge"] * 100, 1) if opportunities else 0,
+            "best_market": opportunities[0]["ticker"] if opportunities else None,
+            "best_city": opportunities[0].get("city", "") if opportunities else None,
+            "best_side": opportunities[0].get("side", "") if opportunities else None,
+            "best_model_prob": round(opportunities[0].get("model_prob", 0) * 100, 1) if opportunities else 0,
+            "best_market_mid": round(opportunities[0].get("market_mid", 0) * 100, 1) if opportunities else 0,
+            "open_positions": status.get("open_position_count", 0),
+            "daily_pnl_cents": status.get("daily_pnl_cents", 0),
+            "trades_today": status.get("trades_today", 0),
+            "balance": status.get("balance_usd"),
+            "can_trade": status.get("can_trade", False),
+            "risk_status": status.get("risk_status", ""),
+            "top_5": [
+                {
+                    "ticker": o["ticker"],
+                    "city": o.get("city", ""),
+                    "strike": f"{o['strike_type']} {o['strike_low']:.0f}" + (f"-{o['strike_high']:.0f}" if o["strike_type"] == "between" else ""),
+                    "model": round(o.get("model_prob", 0) * 100),
+                    "market": round(o.get("market_mid", 0) * 100),
+                    "edge": round(o["edge"] * 100),
+                    "side": o.get("side", ""),
+                }
+                for o in opportunities[:5]
+            ],
+        }
+        state_path = Path(settings.DATA_DIR) / "weather_trader_state.json"
+        state_path.write_text(json.dumps(state, default=str))
+    except Exception:
+        logger.debug("Failed to write weather state", exc_info=True)
+
     logger.info("=== Cycle complete ===")
 
 

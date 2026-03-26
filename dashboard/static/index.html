@@ -302,16 +302,46 @@ async function refresh() {
       }
 
       if (wr.opportunities !== undefined) {
+        const bestEdge = wr.best_edge || 0;
+        const edgeColor = bestEdge >= 20 ? '#3fb950' : bestEdge >= 10 ? '#d29922' : '#8b949e';
+
+        // Top opportunities table
+        let topHtml = '';
+        if (wr.top_5 && wr.top_5.length > 0) {
+          topHtml = '<table style="width:100%;font-size:11px;margin-top:8px;"><thead><tr>' +
+            '<th style="text-align:left;color:#484f58;">City</th>' +
+            '<th style="color:#484f58;">Strike</th>' +
+            '<th style="color:#484f58;">Model</th>' +
+            '<th style="color:#484f58;">Mkt</th>' +
+            '<th style="color:#484f58;">Edge</th>' +
+            '<th style="color:#484f58;">Side</th></tr></thead><tbody>' +
+            wr.top_5.map(o => {
+              const ec = o.edge >= 20 ? '#3fb950' : o.edge >= 10 ? '#d29922' : '#8b949e';
+              return `<tr>
+                <td>${o.city}</td>
+                <td>${o.strike}</td>
+                <td>${o.model}%</td>
+                <td>${o.market}%</td>
+                <td style="color:${ec}">${o.edge}%</td>
+                <td>${o.side}</td>
+              </tr>`;
+            }).join('') + '</tbody></table>';
+        }
+
         document.getElementById('weather-thinking').innerHTML = `
-          <div style="font-size:16px;margin-bottom:4px;">Opportunities: <span class="blue">${wr.opportunities}</span></div>
-          <div style="color:#8b949e;font-size:12px;">
-            Best edge: ${wr.best_edge ? (wr.best_edge*100).toFixed(0)+'%' : '?'}<br>
-            Best market: ${wr.best_market || '?'}<br>
-            Open positions: ${wr.open_positions || 0}<br>
-            Action: ${wr.last_action || 'scanning'}<br>
-            Balance: $${wr.balance || '?'}
+          <div style="display:flex;gap:16px;align-items:center;margin-bottom:6px;">
+            <div style="font-size:20px;color:${edgeColor};font-weight:bold;">${wr.opportunities}</div>
+            <div style="color:#8b949e;font-size:12px;">opportunities found</div>
+            <div style="background:${edgeColor};color:#0d1117;padding:2px 8px;border-radius:4px;font-size:11px;">best: ${bestEdge}% edge</div>
           </div>
-          <div style="color:#484f58;font-size:11px;margin-top:4px;">${fmtTime(wr.time)}</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;color:#8b949e;font-size:12px;">
+            <div>Open positions: ${wr.open_positions || 0}</div>
+            <div>Trades today: ${wr.trades_today || 0}</div>
+            <div>P&L: <span class="${(wr.daily_pnl_cents||0) >= 0 ? 'green' : 'red'}">$${((wr.daily_pnl_cents||0)/100).toFixed(2)}</span></div>
+            <div>Risk: ${wr.can_trade ? '<span class="green">OK</span>' : '<span class="red">'+wr.risk_status+'</span>'}</div>
+          </div>
+          ${topHtml}
+          <div style="color:#484f58;font-size:10px;margin-top:6px;">${fmtTime(wr.time)}</div>
         `;
       }
     } catch(e) {}
