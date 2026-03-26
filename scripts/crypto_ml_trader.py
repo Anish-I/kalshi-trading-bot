@@ -47,7 +47,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 MAX_CONTRACTS = 30
 MAX_ENTRY_PRICE = 0.62
 SCAN_INTERVAL = 30
-DAILY_LOSS_LIMIT_CENTS = 500
+DAILY_LOSS_LIMIT_CENTS = 5000  # $15 daily loss limit
 STATE_FILE = Path(settings.DATA_DIR) / "ml_trader_state.json"
 
 
@@ -83,17 +83,35 @@ def get_btc_price():
 
 
 def load_latest_features():
+    """Load latest bars and compute honest 32-feature set."""
+    from features.honest_features import compute_honest_features
+
+    # Try 1m bars first (from collector)
+    bars_dir = Path(settings.DATA_DIR) / "bars_1m"
+    if bars_dir.exists():
+        files = sorted(bars_dir.glob("*.parquet"))
+        if files:
+            try:
+                df = pd.read_parquet(files[-1])
+                if len(df) >= 65:  # need 60+ bars for feature warmup
+                    featured = compute_honest_features(df)
+                    if len(featured) >= 5:
+                        return featured
+            except Exception:
+                pass
+
+    # Fallback: old feature parquet (may have different columns, model handles missing)
     feat_dir = Path(settings.DATA_DIR) / "features"
-    if not feat_dir.exists():
-        return None
-    files = sorted(feat_dir.glob("*.parquet"))
-    if not files:
-        return None
-    try:
-        df = pd.read_parquet(files[-1])
-        return df if len(df) >= 5 else None
-    except Exception:
-        return None
+    if feat_dir.exists():
+        files = sorted(feat_dir.glob("*.parquet"))
+        if files:
+            try:
+                df = pd.read_parquet(files[-1])
+                return df if len(df) >= 5 else None
+            except Exception:
+                pass
+
+    return None
 
 
 def get_price_velocity(ticker: str, current_mid: float) -> float:

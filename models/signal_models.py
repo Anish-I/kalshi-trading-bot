@@ -24,14 +24,20 @@ class XGBoostModel:
         self.booster.load_model(model_path)
         # Load feature schema if available
         schema_path = model_path.replace('.json', '.schema.json')
-        self.feature_cols = None
+        self.feature_cols: list[str] | None = None
         try:
             import json
             with open(schema_path) as f:
-                self.feature_cols = json.load(f)
-            logger.info("Loaded feature schema (%d cols) from %s", len(self.feature_cols), schema_path)
+                raw = json.load(f)
+            # Handle both formats: plain list or dict with "features" key
+            if isinstance(raw, list):
+                self.feature_cols = raw
+            elif isinstance(raw, dict) and "features" in raw:
+                self.feature_cols = raw["features"]
+            if self.feature_cols:
+                logger.info("Loaded feature schema (%d cols) from %s", len(self.feature_cols), schema_path)
         except Exception:
-            logger.warning("No feature schema found at %s, using dynamic columns", schema_path)
+            logger.warning("No feature schema at %s, using dynamic columns", schema_path)
         logger.info("XGBoost loaded from %s", model_path)
 
     def score(self, features_df) -> tuple[str, float]:
@@ -40,6 +46,7 @@ class XGBoostModel:
             # Ensure exact column match with training schema
             for col in self.feature_cols:
                 if col not in features_df.columns:
+                    features_df = features_df.copy()
                     features_df[col] = 0.0
             cols = self.feature_cols
         else:
@@ -49,15 +56,11 @@ class XGBoostModel:
         proba = self.booster.predict(dmat)[0]
         p_down, p_flat, p_up = float(proba[0]), float(proba[1]), float(proba[2])
 
-        # Cap confidence to 0.80 — XGBoost is not calibrated enough
-        # for 99% confidence. This prevents it from bulldozing other models.
-        MAX_CONF = 0.80
-
         if p_up > p_down and p_up > p_flat:
-            return "up", min(p_up, MAX_CONF)
+            return "up", p_up
         elif p_down > p_up and p_down > p_flat:
-            return "down", min(p_down, MAX_CONF)
-        return "flat", min(p_flat, MAX_CONF)
+            return "down", p_down
+        return "flat", p_flat
 
 
 class MomentumModel:
