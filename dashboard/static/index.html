@@ -198,22 +198,33 @@ async function refresh() {
     wrEl.className = `card-value ${s.win_rate >= 50 ? 'green' : s.win_rate >= 40 ? 'yellow' : 'red'}`;
 
     // Bots
-    const botsHtml = Object.entries(statusRes.bots).map(([name, b]) => `
-      <div class="bot-row">
+    const botsHtml = Object.entries(statusRes.bots).map(([name, b]) => {
+      const controllable = b.controllable !== false;
+      const statusText = b.running
+        ? `PID ${b.pid}${b.uptime_s ? ' | ' + fmtUptime(b.uptime_s) : ''}`
+        : 'Stopped';
+
+      let buttons = '';
+      if (controllable) {
+        if (b.running) {
+          buttons = `<button class="btn stop" onclick="botAction('${name}','stop')">Stop</button>
+                     <button class="btn" onclick="botAction('${name}','restart')">Restart</button>`;
+        } else {
+          buttons = `<button class="btn start" onclick="botAction('${name}','start')">Start</button>`;
+        }
+      } else {
+        buttons = `<span style="color:#484f58;font-size:11px;">always on</span>`;
+      }
+
+      return `<div class="bot-row">
         <div class="bot-info">
           <span class="dot ${b.running ? 'on' : 'off'}"></span>
           <span class="bot-name">${b.label}</span>
-          <span class="bot-meta">${b.running ? `PID ${b.pid} | ${fmtUptime(b.uptime_s)}` : 'Stopped'}</span>
+          <span class="bot-meta">${statusText}</span>
         </div>
-        <div class="bot-actions">
-          ${b.running
-            ? `<button class="btn stop" onclick="botAction('${name}','stop')">Stop</button>
-               <button class="btn" onclick="botAction('${name}','restart')">Restart</button>`
-            : `<button class="btn start" onclick="botAction('${name}','start')">Start</button>`
-          }
-        </div>
-      </div>
-    `).join('');
+        <div class="bot-actions">${buttons}</div>
+      </div>`;
+    }).join('');
     document.getElementById('bots-list').innerHTML = botsHtml;
 
     // Positions
