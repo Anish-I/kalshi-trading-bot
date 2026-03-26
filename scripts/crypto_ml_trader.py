@@ -396,7 +396,7 @@ def main():
             # --- Execute trade ---
             if action == "trading" and side:
                 price_cents = int(entry * 100)
-                # Bet size by agreement: 3/4 → $15, 2/4 → $7
+                # Bet size by agreement: 3/4 > $15, 2/4 > $7
                 bet_dollars = 15 if agreement >= 3 else 7
                 bet_cents = bet_dollars * 100
                 contracts = max(1, min(MAX_CONTRACTS, bet_cents // price_cents))
@@ -428,7 +428,7 @@ def main():
                             resting_orders[ticker] = order_id
                         traded_tickers.add(ticker)
 
-                    # Update journal: pending → executed/resting
+                    # Update journal: pending > executed/resting
                     if journal.entries:
                         journal.entries[-1]["action"] = "executed" if status == "executed" else status
                         journal.entries[-1]["entry_price"] = price_cents
