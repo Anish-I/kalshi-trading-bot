@@ -15,6 +15,13 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 
+# === SINGLETON LOCK — prevents duplicate instances ===
+from engine.process_lock import ProcessLock
+_lock = ProcessLock("collect_data")
+_lock.kill_existing()
+if not _lock.acquire():
+    print("FATAL: Another collect_data is already running. Exiting.")
+    sys.exit(1)
 
 import pandas as pd
 

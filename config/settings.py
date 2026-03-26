@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     COINBASE_CDP_KEY_ID: str = ""
     COINBASE_CDP_PRIVATE_KEY: str = ""
 
+    # Kraken API Key
+    KRAKEN_API_KEY: str = ""
+    KRAKEN_PRIVATE_KEY: str = ""
+
     model_config = {"env_file": str(_PROJECT_ROOT / ".env"), "env_file_encoding": "utf-8"}
 
 

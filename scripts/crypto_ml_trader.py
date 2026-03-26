@@ -18,6 +18,14 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 
+# === SINGLETON LOCK — prevents duplicate instances ===
+from engine.process_lock import ProcessLock
+_lock = ProcessLock("crypto_ml_trader")
+_lock.kill_existing()  # kill any zombie from previous run
+if not _lock.acquire():
+    print("FATAL: Another crypto_ml_trader is already running. Exiting.")
+    sys.exit(1)
+
 import numpy as np
 import pandas as pd
 import httpx

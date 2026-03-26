@@ -16,6 +16,14 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 
+# === SINGLETON LOCK — prevents duplicate instances ===
+from engine.process_lock import ProcessLock
+_lock = ProcessLock("weather_trade")
+_lock.kill_existing()
+if not _lock.acquire():
+    print("FATAL: Another weather_trade is already running. Exiting.")
+    sys.exit(1)
+
 from weather.trader import WeatherTrader
 from config.settings import settings
 
