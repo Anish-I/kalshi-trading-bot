@@ -58,7 +58,7 @@ depth_count = 0
 bar_5s_count = 0
 bar_1m_count = 0
 last_save_time = time.time()
-SAVE_INTERVAL = 300  # Save every 5 minutes
+SAVE_INTERVAL = 60  # Save every 60 seconds — minimize data loss on crash
 
 
 async def on_trade(trade: dict) -> None:
