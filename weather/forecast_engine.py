@@ -187,7 +187,9 @@ class WeatherForecastEngine:
         Falls back to Gaussian if ensemble unavailable.
         """
         try:
-            ensemble = self.meteo.get_gfs_ensemble(city["lat"], city["lon"], target_date)
+            temp_type = city.get("type", "high")
+            temp_var = "temperature_2m_min" if temp_type == "low" else "temperature_2m_max"
+            ensemble = self.meteo.get_gfs_ensemble(city["lat"], city["lon"], target_date, daily_var=temp_var)
 
             if strike_type == "above":
                 prob = self.meteo.ensemble_prob_above(ensemble, strike_value)

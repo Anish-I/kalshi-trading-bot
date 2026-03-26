@@ -81,7 +81,7 @@ class OpenMeteoClient:
             )
             return self._ensemble_fallback(lat, lon, target_date)
 
-    def get_gfs_ensemble(self, lat: float, lon: float, target_date: str) -> dict:
+    def get_gfs_ensemble(self, lat: float, lon: float, target_date: str, daily_var: str = "temperature_2m_max") -> dict:
         """Get full 31-member GFS ensemble forecast for daily max temp.
 
         Returns dict with member predictions, mean, std, and the fraction
@@ -93,7 +93,7 @@ class OpenMeteoClient:
         params = {
             "latitude": lat,
             "longitude": lon,
-            "daily": "temperature_2m_max",
+            "daily": daily_var,
             "temperature_unit": "fahrenheit",
             "models": "gfs_seamless",
         }
@@ -122,7 +122,7 @@ class OpenMeteoClient:
         member_values = []
 
         # Try flat array first (all members interleaved)
-        raw_highs = daily.get("temperature_2m_max", [])
+        raw_highs = daily.get(daily_var, [])
         if raw_highs and isinstance(raw_highs[0], list):
             # Nested: each sub-list is a member's time series
             for member_series in raw_highs:
@@ -135,7 +135,7 @@ class OpenMeteoClient:
 
         # Also try member-specific keys
         for key in sorted(daily.keys()):
-            if "temperature_2m_max" in key and key != "temperature_2m_max":
+            if daily_var in key and key != daily_var:
                 vals = daily[key]
                 if date_idx < len(vals) and vals[date_idx] is not None:
                     member_values.append(vals[date_idx])

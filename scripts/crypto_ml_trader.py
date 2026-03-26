@@ -185,18 +185,21 @@ def check_settlements(c):
             if not yes_ct and not no_ct:
                 continue
             side = "YES" if yes_ct > 0 else "NO"
-            cost = s.get("yes_total_cost", 0) if side == "YES" else s.get("no_total_cost", 0)
-            ct = int(yes_ct if side == "YES" else no_ct)
+            # Read dollar amounts, convert to cents
+            yes_cost_dollars = float(s.get("yes_total_cost_dollars", "0") or "0")
+            no_cost_dollars = float(s.get("no_total_cost_dollars", "0") or "0")
+            cost_cents = int((yes_cost_dollars if side == "YES" else no_cost_dollars) * 100)
+            ct = yes_ct if side == "YES" else no_ct
             mkt_result = s.get("market_result", "")
             won = (side == "YES" and mkt_result == "yes") or (side == "NO" and mkt_result == "no")
-            pnl = (ct * 100 - cost) if won else -cost
+            pnl = int(ct * 100 - cost_cents) if won else -cost_cents
             daily_pnl += pnl
             if won:
                 win_count += 1
             else:
                 loss_count += 1
             settled_tickers.add(ticker)
-            log.info("SETTLED [%s] %s %s x%d pnl=%+dc total=%+dc",
+            log.info("SETTLED [%s] %s %s x%.0f pnl=%+dc total=%+dc",
                       "WIN" if won else "LOSS", ticker, side, ct, pnl, daily_pnl)
             # Feed outcome back to journal
             if _journal is not None:
@@ -244,6 +247,9 @@ def main():
         try:
             scan_count += 1
 
+            check_resting_orders(c)
+            check_settlements(c)
+
             # Daily risk reset
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if today != last_reset_date:
@@ -254,12 +260,8 @@ def main():
                 loss_count = 0
                 trade_count = 0
                 traded_tickers.clear()
-                settled_tickers.clear()
                 resting_orders.clear()
                 last_reset_date = today
-
-            check_resting_orders(c)
-            check_settlements(c)
 
             market = tracker.get_next_market()
             if not market:

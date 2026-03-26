@@ -73,13 +73,16 @@ class WeatherTrader:
                 order_data = resp.get("order", resp)
                 status = order_data.get("status", "")
                 if status == "executed":
-                    # NOW open the position since it filled
+                    # NOW open the position since it filled — use actual fill data
+                    fill_count = int(float(order_data.get("count", count)))
+                    fill_cost = order_data.get("average_fill_price", price)
                     self.position_manager.open_position(
-                        ticker=ticker, side=side, count=count, entry_price_cents=price,
+                        ticker=ticker, side=side, count=fill_count,
+                        entry_price_cents=int(float(str(fill_cost))),
                     )
                     resolved.append(ticker)
                     logger.info("Weather resting order FILLED + position opened: %s %s x%d @ %dc",
-                                ticker, side, count, price)
+                                ticker, side, fill_count, int(float(str(fill_cost))))
                 elif status in ("canceled", "expired"):
                     resolved.append(ticker)
                     logger.info("Weather resting order %s: %s — no position", status, ticker)
@@ -168,7 +171,7 @@ class WeatherTrader:
                 continue
 
             # --- Duplicate position check ---
-            if self.position_manager.get_position(ticker) is not None:
+            if self.position_manager.get_position(ticker) is not None or ticker in self._resting_orders:
                 logger.info("Already have open position on %s, skipping", ticker)
                 continue
 
@@ -207,9 +210,12 @@ class WeatherTrader:
             order_id = order_data.get("order_id", "")
 
             if status == "executed":
+                # Use actual fill data if available
+                fill_count = int(float(order_data.get("count", contracts_per_trade)))
+                fill_cost = order_data.get("average_fill_price", price_cents)
                 self.position_manager.open_position(
-                    ticker=ticker, side=side, count=contracts_per_trade,
-                    entry_price_cents=price_cents,
+                    ticker=ticker, side=side, count=fill_count,
+                    entry_price_cents=int(float(str(fill_cost))),
                 )
             elif status == "resting" and order_id:
                 self._resting_orders[ticker] = (order_id, side, contracts_per_trade, price_cents)

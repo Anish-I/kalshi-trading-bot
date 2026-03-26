@@ -73,14 +73,14 @@ class MomentumModel:
         signals = 0
 
         # 5-min return (calibrated to p75 of actual BTC data)
-        m5 = features.get("momentum_5m", 0) or 0
+        m5 = features.get("momentum_5m") or features.get("ret_5m", 0) or 0
         if m5 > 0.0007:
             signals += 1
         elif m5 < -0.0007:
             signals -= 1
 
         # 10-min return
-        m10 = features.get("momentum_10m", 0) or 0
+        m10 = features.get("momentum_10m") or features.get("ret_10m", 0) or 0
         if m10 > 0.0012:
             signals += 1
         elif m10 < -0.0012:
