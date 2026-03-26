@@ -57,17 +57,20 @@ class XGBoostModel:
         p_down, p_flat, p_up = float(proba[0]), float(proba[1]), float(proba[2])
 
         # Convert 3-class to binary: P(YES) = p_up / (p_up + p_down)
-        # This aligns with Kalshi's binary YES/NO instrument
         denom = p_up + p_down
         if denom < 0.01:
             return "flat", 0.50
         p_binary_up = p_up / denom
         p_binary_down = p_down / denom
 
+        # XGBoost is undertrained — demote to advisory role
+        # Cap at 0.65 so it can't dominate the voting
+        MAX_XGB_CONF = 0.65
+
         if p_binary_up > 0.55:
-            return "up", p_binary_up
+            return "up", min(p_binary_up, MAX_XGB_CONF)
         elif p_binary_down > 0.55:
-            return "down", p_binary_down
+            return "down", min(p_binary_down, MAX_XGB_CONF)
         return "flat", 0.50
 
 
