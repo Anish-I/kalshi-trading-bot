@@ -56,11 +56,19 @@ class XGBoostModel:
         proba = self.booster.predict(dmat)[0]
         p_down, p_flat, p_up = float(proba[0]), float(proba[1]), float(proba[2])
 
-        if p_up > p_down and p_up > p_flat:
-            return "up", p_up
-        elif p_down > p_up and p_down > p_flat:
-            return "down", p_down
-        return "flat", p_flat
+        # Convert 3-class to binary: P(YES) = p_up / (p_up + p_down)
+        # This aligns with Kalshi's binary YES/NO instrument
+        denom = p_up + p_down
+        if denom < 0.01:
+            return "flat", 0.50
+        p_binary_up = p_up / denom
+        p_binary_down = p_down / denom
+
+        if p_binary_up > 0.55:
+            return "up", p_binary_up
+        elif p_binary_down > 0.55:
+            return "down", p_binary_down
+        return "flat", 0.50
 
 
 class MomentumModel:

@@ -45,7 +45,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Config
 MAX_CONTRACTS = 30
-MAX_ENTRY_PRICE = 0.62
+MAX_ENTRY_PRICE = 0.45  # Codex analysis: 38% accuracy only profits below ~35c
 SCAN_INTERVAL = 30
 DAILY_LOSS_LIMIT_CENTS = 5000  # $15 daily loss limit
 STATE_FILE = Path(settings.DATA_DIR) / "ml_trader_state.json"
@@ -100,17 +100,7 @@ def load_latest_features():
             except Exception:
                 pass
 
-    # Fallback: old feature parquet (may have different columns, model handles missing)
-    feat_dir = Path(settings.DATA_DIR) / "features"
-    if feat_dir.exists():
-        files = sorted(feat_dir.glob("*.parquet"))
-        if files:
-            try:
-                df = pd.read_parquet(files[-1])
-                return df if len(df) >= 5 else None
-            except Exception:
-                pass
-
+    # No fallback to legacy features — wait for honest bars warmup
     return None
 
 

@@ -94,7 +94,10 @@ def compute_honest_features(bars_1m: pd.DataFrame) -> pd.DataFrame:
     avg_gain = gain.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    df["rsi_14"] = 100 - (100 / (1 + rs))
+    rsi = pd.Series(100 - (100 / (1 + rs)), index=close.index)
+    # Handle zero-loss regimes: RSI=100 when avg_loss=0 and avg_gain>0, else 50
+    rsi = rsi.where(avg_loss > 0, pd.Series(np.where(avg_gain > 0, 100.0, 50.0), index=close.index))
+    df["rsi_14"] = rsi
 
     # ------------------------------------------------------------------
     # Stochastic %K / %D (14-period)

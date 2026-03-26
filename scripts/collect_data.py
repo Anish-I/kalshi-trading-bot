@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 
-import numpy as np
+
 import pandas as pd
 
 from config.settings import settings
@@ -32,7 +32,6 @@ else:
     _USE_AUTH = False
 
 from data.bar_aggregator import BarAggregator
-from features.pipeline import FeaturePipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,9 +45,7 @@ log = logging.getLogger("collector")
 
 # Globals
 aggregator = BarAggregator(bar_interval_seconds=5)
-pipeline = FeaturePipeline()
 latest_orderbook: dict = {"bids": [], "asks": []}
-feature_rows: list[dict] = []
 trade_count = 0
 depth_count = 0
 bar_5s_count = 0
@@ -72,35 +69,14 @@ async def on_trade(trade: dict) -> None:
     if completed_bar is not None:
         bar_5s_count += 1
 
-        # add_trade() already handles 1m bar aggregation internally
-        # Just check if the deque grew
         if len(aggregator.bars_1m) > prev_1m_len:
             bar_1m_count += 1
-            pipeline.update_1m_bar(dict(aggregator.bars_1m[-1]))
 
-        # Compute features every 5s bar
-        if len(aggregator.bars_5s) >= 24 and len(aggregator.bars_1m) >= 30:
-            bars_5s_df = aggregator.get_bars_5s_df()
-            bars_1m_df = aggregator.get_bars_1m_df()
-
-            try:
-                feats = pipeline.compute(latest_orderbook, bars_5s_df, bars_1m_df)
-                feats["timestamp"] = datetime.now(timezone.utc).isoformat()
-                feats["btc_price"] = trade["price"]
-                feature_rows.append(feats)
-            except Exception as e:
-                log.debug("Feature compute error: %s", e)
-
-        # Periodic status
-        if bar_5s_count % 12 == 0:  # Every minute
-            non_nan = sum(
-                1 for v in (feature_rows[-1] if feature_rows else {}).values()
-                if not (isinstance(v, float) and np.isnan(v))
-            )
+        # Periodic status (no legacy feature computation)
+        if bar_5s_count % 12 == 0:
             log.info(
-                "Status: %d trades, %d 5s bars, %d 1m bars, %d features (%d non-NaN), ob=%d/%d",
+                "Status: %d trades, %d 5s bars, %d 1m bars, ob=%d/%d",
                 trade_count, bar_5s_count, bar_1m_count,
-                len(feature_rows), non_nan,
                 len(latest_orderbook.get("bids", [])),
                 len(latest_orderbook.get("asks", [])),
             )
@@ -129,7 +105,7 @@ async def on_depth(data: dict) -> None:
     else:
         return
 
-    pipeline.update_orderbook(latest_orderbook)
+    # Orderbook stored for reference; honest features computed by trader on demand
 
 
 async def on_kline(kline: dict) -> None:
@@ -172,18 +148,7 @@ def save_data() -> None:
         bars_df.to_parquet(path, index=False)
         log.info("Saved %d 1m bars to %s", len(bars_df), path)
 
-    # Save features
-    if feature_rows:
-        feat_df = pd.DataFrame(feature_rows)
-        path = data_dir / "features" / f"{today}.parquet"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            existing = pd.read_parquet(path)
-            feat_df = pd.concat([existing, feat_df]).drop_duplicates(
-                subset=["timestamp"]
-            ).sort_values("timestamp")
-        feat_df.to_parquet(path, index=False)
-        log.info("Saved %d feature rows to %s", len(feat_df), path)
+    # Legacy feature writing removed — trader computes honest features from bars
 
 
 async def main() -> None:
@@ -246,8 +211,8 @@ async def main() -> None:
         log.info("Saving final data...")
         save_data()
         log.info(
-            "Final: %d trades, %d 5s bars, %d 1m bars, %d features, %d ob updates",
-            trade_count, bar_5s_count, bar_1m_count, len(feature_rows), depth_count,
+            "Final: %d trades, %d 5s bars, %d 1m bars, %d ob updates",
+            trade_count, bar_5s_count, bar_1m_count, depth_count,
         )
 
 
