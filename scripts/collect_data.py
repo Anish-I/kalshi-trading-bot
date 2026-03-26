@@ -122,8 +122,16 @@ async def on_kline(kline: dict) -> None:
     )
 
 
+def _safe_write_parquet(df: pd.DataFrame, path: Path) -> None:
+    """Atomic parquet write: write to temp file, then rename.
+    Prevents corruption if process is killed mid-write."""
+    tmp = path.with_suffix(".tmp")
+    df.to_parquet(tmp, index=False)
+    tmp.replace(path)  # atomic on same filesystem
+
+
 def save_data() -> None:
-    """Save accumulated data to parquet."""
+    """Save accumulated data to parquet (crash-safe)."""
     data_dir = Path(settings.DATA_DIR)
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -131,31 +139,41 @@ def save_data() -> None:
 
     # Save 5s bars
     if aggregator.bars_5s:
-        bars_df = aggregator.get_bars_5s_df()
-        path = data_dir / "bars_5s" / f"{today}.parquet"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            existing = pd.read_parquet(path)
-            bars_df = pd.concat([existing, bars_df]).drop_duplicates(
-                subset=["timestamp"]
-            ).sort_values("timestamp")
-        bars_df.to_parquet(path, index=False)
-        log.info("Saved %d 5s bars to %s", len(bars_df), path)
+        try:
+            bars_df = aggregator.get_bars_5s_df()
+            path = data_dir / "bars_5s" / f"{today}.parquet"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                try:
+                    existing = pd.read_parquet(path)
+                    bars_df = pd.concat([existing, bars_df]).drop_duplicates(
+                        subset=["timestamp"]
+                    ).sort_values("timestamp")
+                except Exception:
+                    log.warning("Corrupt 5s parquet, overwriting")
+            _safe_write_parquet(bars_df, path)
+            log.info("Saved %d 5s bars to %s", len(bars_df), path)
+        except Exception:
+            log.exception("Failed to save 5s bars")
 
     # Save 1m bars
     if aggregator.bars_1m:
-        bars_df = aggregator.get_bars_1m_df()
-        path = data_dir / "bars_1m" / f"{today}.parquet"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            existing = pd.read_parquet(path)
-            bars_df = pd.concat([existing, bars_df]).drop_duplicates(
-                subset=["timestamp"]
-            ).sort_values("timestamp")
-        bars_df.to_parquet(path, index=False)
-        log.info("Saved %d 1m bars to %s", len(bars_df), path)
-
-    # Legacy feature writing removed — trader computes honest features from bars
+        try:
+            bars_df = aggregator.get_bars_1m_df()
+            path = data_dir / "bars_1m" / f"{today}.parquet"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                try:
+                    existing = pd.read_parquet(path)
+                    bars_df = pd.concat([existing, bars_df]).drop_duplicates(
+                        subset=["timestamp"]
+                    ).sort_values("timestamp")
+                except Exception:
+                    log.warning("Corrupt 1m parquet, overwriting")
+            _safe_write_parquet(bars_df, path)
+            log.info("Saved %d 1m bars to %s", len(bars_df), path)
+        except Exception:
+            log.exception("Failed to save 1m bars")
 
 
 async def main() -> None:
@@ -224,8 +242,29 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        log.info("Interrupted - saving...")
-        save_data()
+    MAX_RESTARTS = 1000  # effectively infinite
+    restart_count = 0
+
+    while restart_count < MAX_RESTARTS:
+        try:
+            asyncio.run(main())
+            break  # clean exit
+        except KeyboardInterrupt:
+            log.info("Interrupted - saving...")
+            save_data()
+            break
+        except Exception:
+            restart_count += 1
+            log.exception(
+                "COLLECTOR CRASHED (restart %d/%d). Restarting in 10s...",
+                restart_count, MAX_RESTARTS,
+            )
+            try:
+                save_data()
+            except Exception:
+                log.exception("Failed to save data after crash")
+            import time as _time
+            _time.sleep(10)
+
+    if restart_count >= MAX_RESTARTS:
+        log.critical("COLLECTOR EXCEEDED MAX RESTARTS. Giving up.")
