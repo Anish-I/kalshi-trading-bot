@@ -520,7 +520,7 @@ def main():
             if action == "trading" and side:
                 price_cents = int(entry * 100)
                 contracts = 10  # fixed 10 contracts per trade
-                bet_dollars = contracts * price_cents // 100  # actual notional
+                bet_dollars = contracts * price_cents / 100  # actual notional
 
                 if effective_simulate:
                     # --- SIMULATION MODE: log but don't place ---
