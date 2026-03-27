@@ -48,26 +48,41 @@ from engine.order_ledger import OrderLedger, OrderRecord
 from engine.collector_health import check_collector_freshness
 from engine.session_tags import get_session_tag, is_live_session
 
+_log_file = "crypto_sim.log" if _pre_parsed.simulate else "crypto_live.log"
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("crypto_ml_trader.log"),
+        logging.FileHandler(_log_file),
     ],
 )
 log = logging.getLogger("ml_trader")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# Config
-MAX_CONTRACTS = 30
-MAX_ENTRY_PRICE = 0.45
-SCAN_INTERVAL = 30
-DAILY_LOSS_LIMIT_CENTS = 1500
-MIN_BALANCE_FLOOR = 10.0
+# Separate sim trade log — append-only, one line per trade for easy analysis
+_sim_trade_log = Path(settings.DATA_DIR) / "sim_trades.log" if _pre_parsed.simulate else None
 
 # Simulation mode — reuse the pre-parsed args from the lock section above
 SIMULATE = _pre_parsed.simulate
+
+# Config — looser thresholds in sim mode to generate more data
+if SIMULATE:
+    MAX_CONTRACTS = 10
+    MAX_ENTRY_PRICE = 0.60  # sim can buy up to 60c (vs 45c live)
+    SCAN_INTERVAL = 30
+    DAILY_LOSS_LIMIT_CENTS = 99999  # no limit in sim
+    MIN_BALANCE_FLOOR = 0.0  # no floor in sim
+    SIM_MIN_AGREEMENT = 1.5  # lower agreement threshold for sim
+    SIM_MIN_EDGE = 0.01  # 1% edge minimum (vs 3% live)
+else:
+    MAX_CONTRACTS = 30
+    MAX_ENTRY_PRICE = 0.45
+    SCAN_INTERVAL = 30
+    DAILY_LOSS_LIMIT_CENTS = 1500
+    MIN_BALANCE_FLOOR = 10.0
+    SIM_MIN_AGREEMENT = 2.0
+    SIM_MIN_EDGE = 0.03
 STATE_FILE = Path(settings.DATA_DIR) / "ml_trader_state.json"
 
 
@@ -224,6 +239,10 @@ def check_settlements(c):
 
                 log.info("SIM SETTLED [%s] %s %s @ %dc pnl=%+dc total=%+dc",
                          "WIN" if won else "LOSS", ticker, sim_side.upper(), sim_price, pnl, daily_pnl)
+
+                if _sim_trade_log:
+                    with open(_sim_trade_log, "a") as f:
+                        f.write(f"{datetime.now(timezone.utc).isoformat()} SETTLED {'WIN' if won else 'LOSS'} {sim_side.upper()} {ticker} @ {sim_price}c pnl={pnl:+d}c total={daily_pnl:+d}c W{win_count}/L{loss_count}\n")
 
                 if _journal:
                     _journal.log_outcome(ticker, won, pnl)
@@ -417,19 +436,19 @@ def main():
                 action = "balance_floor"
             elif daily_pnl <= -DAILY_LOSS_LIMIT_CENTS:
                 action = "loss_limit_hit"
-            elif agreement < 2:
+            elif agreement < SIM_MIN_AGREEMENT:
                 action = "no_consensus"
             elif direction == "up" and 0 < yes_ask <= MAX_ENTRY_PRICE:
                 side = "yes"
                 entry = yes_ask
                 edge = combined_conf - yes_ask
-                if edge > 0.03:
+                if edge > SIM_MIN_EDGE:
                     action = "trading"
             elif direction == "down" and 0 < no_ask <= MAX_ENTRY_PRICE:
                 side = "no"
                 entry = no_ask
                 edge = combined_conf - no_ask
-                if edge > 0.03:
+                if edge > SIM_MIN_EDGE:
                     action = "trading"
 
             if action != "trading" and side:
@@ -511,6 +530,13 @@ def main():
                         side.upper(), ticker, price_cents, contracts, bet_dollars,
                         agreement, edge * 100,
                     )
+                    # Write to dedicated sim trade log
+                    if _sim_trade_log:
+                        with open(_sim_trade_log, "a") as f:
+                            f.write(f"{datetime.now(timezone.utc).isoformat()} TRADE {side.upper()} {ticker} @ {price_cents}c x{contracts} "
+                                    f"edge={edge*100:.0f}% agree={agreement:.1f}/4 "
+                                    f"XGB={xgb_vote[0].upper()} MOM={mom_vote[0].upper()} MR={mr_vote[0].upper()} KAL={kalshi_vote[0].upper()} "
+                                    f"BTC=${btc:,.0f}\n" if btc else "")
                     traded_tickers.add(ticker)
                     trade_count += 1
 
