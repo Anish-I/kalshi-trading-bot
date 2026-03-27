@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-DATA_FILE = Path("D:/kalshi-data/binance_history/klines_14d.parquet")
+DATA_FILE = Path("D:/kalshi-data/binance_history/klines_90d.parquet")
 MODEL_DIR = Path("D:/kalshi-models")
 FORWARD_BARS = 15          # 15-min forward return on 1m bars
 THRESHOLD_BPS = 0.001      # 10 bps

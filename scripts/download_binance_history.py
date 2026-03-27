@@ -17,8 +17,8 @@ log = logging.getLogger(__name__)
 
 BASE_URL = "https://data.binance.vision/data/spot/daily/klines/BTCUSDT/1m"
 OUTPUT_DIR = Path("D:/kalshi-data/binance_history")
-OUTPUT_FILE = OUTPUT_DIR / "klines_14d.parquet"
-DAYS = 14
+OUTPUT_FILE = OUTPUT_DIR / "klines_90d.parquet"
+DAYS = 90
 
 CSV_COLUMNS = [
     "open_time", "open", "high", "low", "close", "volume",
