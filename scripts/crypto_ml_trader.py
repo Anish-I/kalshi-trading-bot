@@ -55,8 +55,15 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 MAX_CONTRACTS = 30
 MAX_ENTRY_PRICE = 0.45
 SCAN_INTERVAL = 30
-DAILY_LOSS_LIMIT_CENTS = 1500  # $15 daily loss limit
-MIN_BALANCE_FLOOR = 10.0  # NEVER trade if balance drops below $10
+DAILY_LOSS_LIMIT_CENTS = 1500
+MIN_BALANCE_FLOOR = 10.0
+
+# Simulation mode: --simulate flag = log trades but don't place orders
+import argparse
+_parser = argparse.ArgumentParser()
+_parser.add_argument("--simulate", action="store_true", help="Simulate trades without placing real orders")
+_args = _parser.parse_args()
+SIMULATE = _args.simulate
 STATE_FILE = Path(settings.DATA_DIR) / "ml_trader_state.json"
 
 
@@ -173,6 +180,55 @@ _journal: TradeJournal | None = None  # set in main()
 
 def check_settlements(c):
     global daily_pnl, win_count, loss_count, settled_tickers
+
+    if SIMULATE:
+        # In simulation mode, check market results directly for our simulated tickers
+        for ticker in list(traded_tickers - settled_tickers):
+            try:
+                mkt = c.get_market(ticker)
+                m = mkt.get("market", mkt)
+                if m.get("status") not in ("finalized", "settled"):
+                    continue
+                result_val = m.get("result", "")
+                if not result_val:
+                    continue
+
+                # Find the journal entry for this ticker to get our simulated side
+                sim_side = None
+                sim_price = 50  # default
+                if _journal:
+                    for entry in reversed(_journal.entries):
+                        if entry.get("ticker") == ticker and entry.get("action") == "simulated":
+                            sim_side = entry.get("side")
+                            sim_price = entry.get("entry_price", 50)
+                            break
+
+                if not sim_side:
+                    settled_tickers.add(ticker)
+                    continue
+
+                won = (sim_side == "yes" and result_val == "yes") or \
+                      (sim_side == "no" and result_val == "no")
+                pnl = (100 - sim_price) if won else -sim_price
+
+                daily_pnl += pnl
+                if won:
+                    win_count += 1
+                else:
+                    loss_count += 1
+                settled_tickers.add(ticker)
+
+                log.info("SIM SETTLED [%s] %s %s @ %dc pnl=%+dc total=%+dc",
+                         "WIN" if won else "LOSS", ticker, sim_side.upper(), sim_price, pnl, daily_pnl)
+
+                if _journal:
+                    _journal.log_outcome(ticker, won, pnl)
+                    _journal.save()
+            except Exception:
+                pass
+        return
+
+    # Live mode: check real settlements
     try:
         result = c._request("GET", "/portfolio/settlements", params={"limit": 10})
         for s in result.get("settlements", []):
@@ -218,7 +274,10 @@ def write_state(state):
 
 def main():
     log.info("=" * 60)
-    log.info("  CRYPTO ML TRADER v3 -- Multi-Model Voting System")
+    if SIMULATE:
+        log.info("  CRYPTO ML TRADER v3 -- SIMULATION MODE (no real orders)")
+    else:
+        log.info("  CRYPTO ML TRADER v3 -- LIVE MODE")
     log.info("  Models: XGBoost + Momentum + MeanReversion + KalshiConsensus")
     log.info("=" * 60)
 
@@ -413,72 +472,87 @@ def main():
             # --- Execute trade ---
             if action == "trading" and side:
                 price_cents = int(entry * 100)
-                # Bet size by agreement: 3/4 > $15, 2/4 > $7
                 bet_dollars = 15 if agreement >= 3 else 7
                 bet_cents = bet_dollars * 100
                 contracts = max(1, min(MAX_CONTRACTS, bet_cents // price_cents))
 
-                log.info(
-                    ">>> TRADE: %s %s @ %dc x%d ($%d) | %d/4 agree | edge=%.0f%%",
-                    side.upper(), ticker, price_cents, contracts, bet_dollars,
-                    agreement, edge * 100,
-                )
+                if SIMULATE:
+                    # --- SIMULATION MODE: log but don't place ---
+                    log.info(
+                        ">>> SIM TRADE: %s %s @ %dc x%d ($%d) | %.0f/4 agree | edge=%.0f%%",
+                        side.upper(), ticker, price_cents, contracts, bet_dollars,
+                        agreement, edge * 100,
+                    )
+                    traded_tickers.add(ticker)
+                    trade_count += 1
 
-                try:
-                    if side == "yes":
-                        order = c.place_order(ticker, side="yes", action="buy",
-                                              count=contracts, order_type="limit",
-                                              yes_price=price_cents)
-                    else:
-                        order = c.place_order(ticker, side="no", action="buy",
-                                              count=contracts, order_type="limit",
-                                              no_price=price_cents)
-
-                    status = order.get("order", order).get("status", "?")
-                    log.info("    Order: %s", status)
-                    if status == "executed":
-                        traded_tickers.add(ticker)
-                        trade_count += 1
-                    elif status == "resting":
-                        order_id = order.get("order", order).get("order_id", "")
-                        if order_id:
-                            resting_orders[ticker] = order_id
-                        traded_tickers.add(ticker)
-
-                    # Update journal: pending > executed/resting
                     if journal.entries:
-                        journal.entries[-1]["action"] = "executed" if status == "executed" else status
+                        journal.entries[-1]["action"] = "simulated"
                         journal.entries[-1]["entry_price"] = price_cents
                         journal.entries[-1]["contracts"] = contracts
                         journal.entries[-1]["bet_dollars"] = bet_dollars
                         journal.save()
 
-                    # Write notification for dashboard
-                    notif = {
-                        "type": "trade",
-                        "time": datetime.now(timezone.utc).isoformat(),
-                        "ticker": ticker,
-                        "side": side.upper(),
-                        "price": price_cents,
-                        "contracts": contracts,
-                        "bet": bet_dollars,
-                        "agreement": agreement,
-                        "confidence": round(combined_conf * 100, 1),
-                        "edge": round(edge * 100, 1),
-                        "status": status,
-                        "btc_price": btc,
-                    }
-                    try:
-                        notif_path = Path(settings.DATA_DIR) / "notifications.json"
-                        notif_path.write_text(json.dumps(notif, default=str))
-                    except Exception:
-                        pass
+                    # Track for settlement checking — we'll see if we would have won
+                    # by checking the market result later
+                else:
+                    # --- LIVE MODE: place real order ---
+                    log.info(
+                        ">>> TRADE: %s %s @ %dc x%d ($%d) | %.0f/4 agree | edge=%.0f%%",
+                        side.upper(), ticker, price_cents, contracts, bet_dollars,
+                        agreement, edge * 100,
+                    )
 
-                except Exception as e:
-                    log.error("    Order FAILED: %s", e)
-                    if journal.entries:
-                        journal.entries[-1]["action"] = "failed"
-                        journal.save()
+                    try:
+                        if side == "yes":
+                            order = c.place_order(ticker, side="yes", action="buy",
+                                                  count=contracts, order_type="limit",
+                                                  yes_price=price_cents)
+                        else:
+                            order = c.place_order(ticker, side="no", action="buy",
+                                                  count=contracts, order_type="limit",
+                                                  no_price=price_cents)
+
+                        status = order.get("order", order).get("status", "?")
+                        log.info("    Order: %s", status)
+                        if status == "executed":
+                            traded_tickers.add(ticker)
+                            trade_count += 1
+                        elif status == "resting":
+                            order_id = order.get("order", order).get("order_id", "")
+                            if order_id:
+                                resting_orders[ticker] = order_id
+                            traded_tickers.add(ticker)
+
+                        if journal.entries:
+                            journal.entries[-1]["action"] = "executed" if status == "executed" else status
+                            journal.entries[-1]["entry_price"] = price_cents
+                            journal.entries[-1]["contracts"] = contracts
+                            journal.entries[-1]["bet_dollars"] = bet_dollars
+                            journal.save()
+
+                        # Dashboard notification
+                        notif = {
+                            "type": "trade",
+                            "time": datetime.now(timezone.utc).isoformat(),
+                            "ticker": ticker, "side": side.upper(),
+                            "price": price_cents, "contracts": contracts,
+                            "bet": bet_dollars, "agreement": agreement,
+                            "confidence": round(combined_conf * 100, 1),
+                            "edge": round(edge * 100, 1),
+                            "status": status, "btc_price": btc,
+                        }
+                        try:
+                            notif_path = Path(settings.DATA_DIR) / "notifications.json"
+                            notif_path.write_text(json.dumps(notif, default=str))
+                        except Exception:
+                            pass
+
+                    except Exception as e:
+                        log.error("    Order FAILED: %s", e)
+                        if journal.entries:
+                            journal.entries[-1]["action"] = "failed"
+                            journal.save()
 
             # Save journal periodically
             if scan_count % 10 == 0:
