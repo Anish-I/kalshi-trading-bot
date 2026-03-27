@@ -482,7 +482,7 @@ def main():
                 "trades_today": trade_count,
                 "wins": win_count,
                 "losses": loss_count,
-                "model_weights": {k: round(v, 2) for k, v in weights.items()},
+                "rule": "xgb+mom conjunction",
                 "daily_pnl_cents": daily_pnl,
                 "balance": round(c.get_balance(), 2) if scan_count % 10 == 0 else None,
                 "simulate": SIMULATE,
