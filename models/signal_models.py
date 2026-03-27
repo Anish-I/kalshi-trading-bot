@@ -63,10 +63,11 @@ class XGBoostModel:
         p_binary_up = p_up / denom
         p_binary_down = p_down / denom
 
-        # 90-day model has log_loss < 1.099 — probabilities are calibrated enough
-        if p_binary_up > 0.55:
+        # 90-day model has log_loss < 1.099 — slightly calibrated
+        # 0.52 threshold: XGB has directional opinion ~80% of the time
+        if p_binary_up > 0.52:
             return "up", p_binary_up
-        elif p_binary_down > 0.55:
+        elif p_binary_down > 0.52:
             return "down", p_binary_down
         return "flat", 0.50
 
