@@ -167,7 +167,7 @@ tr:hover { background:rgba(0,229,255,0.03); }
 <div class="grid">
   <!-- CRYPTO VOTING -->
   <div class="panel">
-    <div class="panel-title">Crypto Voting Engine <span class="tag" id="crypto-mode-tag">BTC 15m</span></div>
+    <div class="panel-title">Crypto XGB+MOM <span class="tag" id="crypto-mode-tag">BTC 15m</span></div>
     <div id="crypto-thinking">Waiting for data...</div>
   </div>
 
@@ -336,29 +336,42 @@ async function refresh() {
         }
 
         const clr=cr.prediction==='UP'?'var(--green)':cr.prediction==='DOWN'?'var(--red)':'var(--text-dim)';
-        const actClr={trading:'var(--green)',simulated:'var(--purple)',no_consensus:'var(--yellow)',monitoring:'var(--accent)',outside_window:'var(--text-dim)',already_traded:'var(--text-dim)',no_edge:'var(--yellow)',loss_limit_hit:'var(--red)',balance_floor:'var(--red)'};
-        const labels={xgboost:'XGB',momentum:'MOM',mean_reversion:'M·REV',kalshi_consensus:'KALSHI'};
+        const actClr={trading:'var(--green)',simulated:'var(--purple)',no_consensus:'var(--text-dim)',monitoring:'var(--accent)',outside_window:'var(--text-dim)',already_traded:'var(--text-dim)',no_edge:'var(--yellow)',loss_limit_hit:'var(--red)',balance_floor:'var(--red)',collector_stale:'var(--red)'};
         const mdls=cr.models||{};
 
-        const votesHtml=['xgboost','momentum','mean_reversion','kalshi_consensus'].map(m=>{
-          const v=mdls[m]||{vote:'FLAT',confidence:0};
-          const c=v.vote==='UP'?'up':v.vote==='DOWN'?'down':'';
-          const vc=v.vote==='UP'?'var(--green)':v.vote==='DOWN'?'var(--red)':'var(--text-dim)';
-          const arr=v.vote==='UP'?'&#9650;':v.vote==='DOWN'?'&#9660;':'—';
-          return `<div class="vote-card ${c}"><div class="vote-label">${labels[m]}</div><div class="vote-dir" style="color:${vc}">${arr}</div><div class="vote-conf" style="color:${vc}">${v.confidence}%</div></div>`;
-        }).join('');
+        // Show XGB + MOM as the decision pair, MR + Kalshi as info-only
+        const xgb = mdls.xgboost||{vote:'FLAT',confidence:0};
+        const mom = mdls.momentum||{vote:'FLAT',confidence:0};
+        const mr = mdls.mean_reversion||{vote:'FLAT',confidence:0};
+        const kal = mdls.kalshi_consensus||{vote:'FLAT',confidence:0};
 
-        const ag=cr.agreement||0;
-        const agClr=ag>=3?'var(--green)':ag>=2?'var(--yellow)':'var(--text-dim)';
+        function voteBox(label, v, isAlpha) {
+          const vc=v.vote==='UP'?'var(--green)':v.vote==='DOWN'?'var(--red)':'var(--text-dim)';
+          const border = isAlpha ? vc : 'var(--border)';
+          const opacity = isAlpha ? '1' : '0.5';
+          const arr=v.vote==='UP'?'&#9650;':v.vote==='DOWN'?'&#9660;':'—';
+          return '<div style="flex:1;background:var(--bg);border:2px solid '+border+';border-radius:3px;padding:8px 4px;text-align:center;opacity:'+opacity+'">'+
+            '<div style="color:var(--text-dim);font-size:9px;text-transform:uppercase;letter-spacing:0.5px">'+label+(isAlpha?'':'<span style=\"font-size:7px\"> info</span>')+'</div>'+
+            '<div style="color:'+vc+';font-size:16px;font-weight:700;margin:3px 0">'+arr+'</div>'+
+            '<div style="color:'+vc+';font-size:11px">'+v.confidence+'%</div></div>';
+        }
+
+        const votesHtml = '<div style="display:flex;gap:6px;margin-bottom:8px">' +
+          voteBox('XGB', xgb, true) + voteBox('MOM', mom, true) +
+          voteBox('M-REV', mr, false) + voteBox('KALSHI', kal, false) + '</div>';
+
+        const agreed = cr.agreement >= 2;
+        const agreeText = agreed ? 'XGB + MOM AGREE' : 'no agreement';
+        const agClr = agreed ? 'var(--green)' : 'var(--text-dim)';
 
         document.getElementById('crypto-thinking').innerHTML=`
-          <div class="votes">${votesHtml}</div>
-          ${isSim ? '<div style="background:var(--purple);color:var(--bg);padding:3px 10px;border-radius:2px;font-size:10px;font-weight:700;letter-spacing:1px;margin-bottom:8px;display:inline-block">PAPER TRADING — NO REAL ORDERS</div>' : ''}
+          ${isSim ? '<div style="background:var(--purple);color:var(--bg);padding:3px 10px;border-radius:2px;font-size:10px;font-weight:700;letter-spacing:1px;margin-bottom:8px;display:inline-block">PAPER TRADING</div>' : ''}
+          ${votesHtml}
           <div class="result-bar">
             <div class="result-dir" style="color:${clr}">${cr.prediction==='UP'?'&#9650;':cr.prediction==='DOWN'?'&#9660;':'—'} ${cr.prediction}</div>
-            <div class="result-badge" style="background:${agClr};color:var(--bg)">${typeof ag==='number'&&ag%1!==0?ag.toFixed(1):ag}/4</div>
+            <div class="result-badge" style="background:${agClr};color:var(--bg)">${agreeText}</div>
             <div style="color:var(--text-dim);font-size:12px">${cr.confidence}%</div>
-            <div class="result-action" style="background:${actClr[cr.action]||'var(--text-dim)'};color:var(--bg)">${isSim && cr.action==='trading' ? 'sim_trade' : cr.action}</div>
+            <div class="result-action" style="background:${actClr[cr.action]||'var(--text-dim)'};color:var(--bg)">${cr.action}</div>
           </div>
           <div class="data-grid">
             <div class="label">BTC</div><div class="value" style="color:var(--text-bright)">$${cr.btc_price?cr.btc_price.toLocaleString():'—'}</div>
