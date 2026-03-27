@@ -525,7 +525,7 @@ def main():
                 if effective_simulate:
                     # --- SIMULATION MODE: log but don't place ---
                     log.info(
-                        ">>> SIM TRADE: %s %s @ %dc x%d ($%d) | %.0f/4 agree | edge=%.0f%%",
+                        ">>> SIM TRADE: %s %s @ %dc x%d ($%.1f) | %.0f/4 agree | edge=%.0f%%",
                         side.upper(), ticker, price_cents, contracts, bet_dollars,
                         agreement, edge * 100,
                     )
@@ -563,7 +563,7 @@ def main():
                 else:
                     # --- LIVE MODE: place real order ---
                     log.info(
-                        ">>> TRADE: %s %s @ %dc x%d ($%d) | %.0f/4 agree | edge=%.0f%%",
+                        ">>> TRADE: %s %s @ %dc x%d ($%.1f) | %.0f/4 agree | edge=%.0f%%",
                         side.upper(), ticker, price_cents, contracts, bet_dollars,
                         agreement, edge * 100,
                     )
