@@ -18,12 +18,17 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 
-# === SINGLETON LOCK — prevents duplicate instances ===
+# === SINGLETON LOCK — sim and live get separate locks ===
 from engine.process_lock import ProcessLock
-_lock = ProcessLock("crypto_ml_trader")
-_lock.kill_existing()  # kill any zombie from previous run
+import argparse as _ap
+_pre_args = _ap.ArgumentParser(add_help=False)
+_pre_args.add_argument("--simulate", action="store_true")
+_pre_parsed, _ = _pre_args.parse_known_args()
+_lock_name = "crypto_sim" if _pre_parsed.simulate else "crypto_live"
+_lock = ProcessLock(_lock_name)
+_lock.kill_existing()
 if not _lock.acquire():
-    print("FATAL: Another crypto_ml_trader is already running. Exiting.")
+    print(f"FATAL: Another {_lock_name} is already running. Exiting.")
     sys.exit(1)
 
 import numpy as np

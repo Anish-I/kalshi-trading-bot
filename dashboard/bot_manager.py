@@ -54,10 +54,8 @@ class BotManager:
         self._start_times: dict[str, float] = {}
 
     def _get_lock_pid(self, name: str) -> int | None:
-        """Read PID from lock file. Both crypto_live and crypto_sim share crypto_ml_trader.pid."""
-        # The actual script uses "crypto_ml_trader" as lock name regardless of sim/live
-        lock_name = "crypto_ml_trader" if name.startswith("crypto_") else name
-        lock_file = LOCK_DIR / f"{lock_name}.pid"
+        """Read PID from lock file. crypto_live and crypto_sim have separate locks."""
+        lock_file = LOCK_DIR / f"{name}.pid"
         if not lock_file.exists():
             return None
         try:
