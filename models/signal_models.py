@@ -63,14 +63,11 @@ class XGBoostModel:
         p_binary_up = p_up / denom
         p_binary_down = p_down / denom
 
-        # XGBoost is undertrained — demote to advisory role
-        # Cap at 0.65 so it can't dominate the voting
-        MAX_XGB_CONF = 0.65
-
+        # 90-day model has log_loss < 1.099 — probabilities are calibrated enough
         if p_binary_up > 0.55:
-            return "up", min(p_binary_up, MAX_XGB_CONF)
+            return "up", p_binary_up
         elif p_binary_down > 0.55:
-            return "down", min(p_binary_down, MAX_XGB_CONF)
+            return "down", p_binary_down
         return "flat", 0.50
 
 

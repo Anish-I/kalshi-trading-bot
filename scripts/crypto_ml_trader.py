@@ -398,21 +398,16 @@ def main():
             velocity = get_price_velocity(ticker, market_mid)
             kalshi_vote, kalshi_conf = kalshi_model.score(kalshi_imb, velocity, market_mid)
 
-            # --- Weighted vote ---
-            weights = journal.get_model_weights()
-            all_votes = [
-                (xgb_vote, xgb_conf),
-                (mom_vote, mom_conf),
-                (mr_vote, mr_conf),
-                (kalshi_vote, kalshi_conf),
-            ]
-            weight_list = [
-                weights.get("xgboost", 1.0),
-                weights.get("momentum", 1.0),
-                weights.get("mean_reversion", 1.0),
-                weights.get("kalshi_consensus", 1.0),
-            ]
-            direction, combined_conf, agreement = vote(all_votes, weight_list)
+            # --- XGB + Momentum conjunction (only tradeable signal) ---
+            # MR and Kalshi kept for dashboard display only, not alpha
+            if xgb_vote == mom_vote and xgb_vote != "flat":
+                direction = xgb_vote
+                confidence = (xgb_conf + mom_conf) / 2
+                agreement = 2
+            else:
+                direction = "flat"
+                confidence = 0.50
+                agreement = 0
 
             # --- Determine action ---
             action = "monitoring"
@@ -420,24 +415,20 @@ def main():
             entry = 0.0
             edge = 0.0
 
-            # Balance floor guardrail
+            # Guardrails
             try:
                 current_bal = c.get_balance() if scan_count % 5 == 0 else None
             except Exception:
                 current_bal = None
 
-            # Collector freshness check
             collector = check_collector_freshness(settings.DATA_DIR, settings.COLLECTOR_STALE_SECONDS)
-            if not collector["healthy"]:
-                action = "collector_stale"
-
-            # Session tag
             session = get_session_tag()
             is_live = is_live_session(session, settings.CRYPTO_LIVE_SESSIONS)
-            # Force simulate if not in live session (even if --simulate not passed)
             effective_simulate = SIMULATE or not is_live
 
-            if ticker in traded_tickers:
+            if not collector["healthy"]:
+                action = "collector_stale"
+            elif ticker in traded_tickers:
                 action = "already_traded"
             elif remaining < 120 or remaining > 780:
                 action = "outside_window"
@@ -445,18 +436,18 @@ def main():
                 action = "balance_floor"
             elif daily_pnl <= -DAILY_LOSS_LIMIT_CENTS:
                 action = "loss_limit_hit"
-            elif agreement < SIM_MIN_AGREEMENT:
+            elif agreement < 2:
                 action = "no_consensus"
             elif direction == "up" and 0 < yes_ask <= MAX_ENTRY_PRICE:
                 side = "yes"
                 entry = yes_ask
-                edge = combined_conf - yes_ask
+                edge = confidence - yes_ask
                 if edge > SIM_MIN_EDGE:
                     action = "trading"
             elif direction == "down" and 0 < no_ask <= MAX_ENTRY_PRICE:
                 side = "no"
                 entry = no_ask
-                edge = combined_conf - no_ask
+                edge = confidence - no_ask
                 if edge > SIM_MIN_EDGE:
                     action = "trading"
 
@@ -478,7 +469,7 @@ def main():
                 },
                 "prediction": direction.upper(),
                 "agreement": agreement,
-                "confidence": round(combined_conf * 100, 1),
+                "confidence": round(confidence * 100, 1),
                 "collector_health": collector.get("healthy", True),
                 "collector_age_s": collector.get("age_seconds"),
                 "session_tag": session,
@@ -502,7 +493,7 @@ def main():
             votes_str = f"XGB={xgb_vote[0].upper()} MOM={mom_vote[0].upper()} MR={mr_vote[0].upper()} KAL={kalshi_vote[0].upper()}"
             log.info(
                 "%s | %s %d/4 %.0f%% | %s | BTC=$%s mkt=%.0fc | edge=%.0f%% | %s | W%d/L%d $%.2f",
-                ticker[-8:], direction.upper(), agreement, combined_conf * 100,
+                ticker[-8:], direction.upper(), agreement, confidence * 100,
                 votes_str,
                 f"{btc:,.0f}" if btc else "?",
                 market_mid * 100,
@@ -528,9 +519,8 @@ def main():
             # --- Execute trade ---
             if action == "trading" and side:
                 price_cents = int(entry * 100)
-                bet_dollars = 15 if agreement >= 3 else 7
-                bet_cents = bet_dollars * 100
-                contracts = max(1, min(MAX_CONTRACTS, bet_cents // price_cents))
+                bet_dollars = 5  # fixed sizing — no agreement-based scaling
+                contracts = 10  # fixed 10 contracts per trade
 
                 if effective_simulate:
                     # --- SIMULATION MODE: log but don't place ---
@@ -628,7 +618,7 @@ def main():
                             "ticker": ticker, "side": side.upper(),
                             "price": price_cents, "contracts": contracts,
                             "bet": bet_dollars, "agreement": agreement,
-                            "confidence": round(combined_conf * 100, 1),
+                            "confidence": round(confidence * 100, 1),
                             "edge": round(edge * 100, 1),
                             "status": status, "btc_price": btc,
                         }
