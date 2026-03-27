@@ -402,7 +402,7 @@ def main():
             # MR and Kalshi kept for dashboard display only, not alpha
             if xgb_vote == mom_vote and xgb_vote != "flat":
                 direction = xgb_vote
-                confidence = (xgb_conf + mom_conf) / 2
+                confidence = 0.485  # empirical P(win | XGB+MOM agree) from 90-day backtest
                 agreement = 2
             else:
                 direction = "flat"
@@ -485,7 +485,7 @@ def main():
                 "rule": "xgb+mom conjunction",
                 "daily_pnl_cents": daily_pnl,
                 "balance": round(c.get_balance(), 2) if scan_count % 10 == 0 else None,
-                "simulate": SIMULATE,
+                "simulate": effective_simulate,
             }
             write_state(state)
 
@@ -519,8 +519,8 @@ def main():
             # --- Execute trade ---
             if action == "trading" and side:
                 price_cents = int(entry * 100)
-                bet_dollars = 5  # fixed sizing — no agreement-based scaling
                 contracts = 10  # fixed 10 contracts per trade
+                bet_dollars = contracts * price_cents // 100  # actual notional
 
                 if effective_simulate:
                     # --- SIMULATION MODE: log but don't place ---
