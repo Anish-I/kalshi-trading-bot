@@ -295,14 +295,16 @@ class WeatherTrader:
                 logger.info("Already have open position on %s, skipping", ticker)
                 continue
 
-            # --- City tier sizing ---
+            # --- City tier sizing (uses config multipliers) ---
             city_short = opp.get("city_short", "")
             tier = _get_city_tier(city_short)
-            if tier == 3:
+            if tier == 3 and not settings.WEATHER_TIER3_LIVE_ENABLED:
                 logger.info("Skipping tier-3 city %s (MAE > 3.5F)", city_short)
                 continue
             elif tier == 2:
-                contracts_per_trade = max(1, contracts_per_trade // 2)
+                contracts_per_trade = max(1, int(contracts_per_trade * settings.WEATHER_TIER2_SIZE_MULTIPLIER))
+            elif tier == 1:
+                contracts_per_trade = max(1, int(contracts_per_trade * settings.WEATHER_TIER1_SIZE_MULTIPLIER))
 
             # --- Bracket sizing ---
             if opp.get("strike_type") == "between":
