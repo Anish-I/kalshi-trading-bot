@@ -66,12 +66,8 @@ SCAN_INTERVAL = 30
 DAILY_LOSS_LIMIT_CENTS = 1500
 MIN_BALANCE_FLOOR = 10.0
 
-# Simulation mode: --simulate flag = log trades but don't place orders
-import argparse
-_parser = argparse.ArgumentParser()
-_parser.add_argument("--simulate", action="store_true", help="Simulate trades without placing real orders")
-_args = _parser.parse_args()
-SIMULATE = _args.simulate
+# Simulation mode — reuse the pre-parsed args from the lock section above
+SIMULATE = _pre_parsed.simulate
 STATE_FILE = Path(settings.DATA_DIR) / "ml_trader_state.json"
 
 
