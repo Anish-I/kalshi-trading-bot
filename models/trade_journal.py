@@ -124,7 +124,7 @@ class TradeJournal:
     def log_outcome(self, ticker: str, won: bool, pnl_cents: int) -> None:
         """Update the most recent entry for this ticker with the outcome."""
         for entry in reversed(self.entries):
-            if entry.get("ticker") == ticker and entry.get("action") in ("trading", "pending", "executed", "resting"):
+            if entry.get("ticker") == ticker and entry.get("action") in ("trading", "pending", "executed", "resting", "simulated"):
                 entry["won"] = won
                 entry["pnl_cents"] = pnl_cents
                 entry["settled"] = True
