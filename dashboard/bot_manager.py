@@ -1,4 +1,8 @@
-"""Manage trading bot subprocesses — start, stop, restart."""
+"""Manage trading bot subprocesses — start, stop, restart.
+
+Uses PID lock files (D:/kalshi-data/locks/) to detect bots launched
+from ANY source — terminal, dashboard, or scheduled task.
+"""
 
 import logging
 import os
@@ -6,6 +10,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+from engine.process_lock import _is_pid_alive, LOCK_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +23,7 @@ BOT_CONFIGS = {
         "label": "Crypto ML Trader",
         "log": "crypto_ml_trader_bg.log",
         "controllable": True,
+        "extra_args": ["--simulate"],
     },
     "weather_trade": {
         "script": "scripts/weather_trade.py",
@@ -33,26 +40,34 @@ BOT_CONFIGS = {
 }
 
 
-def _find_process(script_name: str) -> int | None:
-    """Find PID of a running Python process by script name."""
-    try:
-        result = subprocess.run(
-            ["powershell", "-Command",
-             f"Get-Process python* -ErrorAction SilentlyContinue | "
-             f"Where-Object {{$_.CommandLine -like '*{script_name}*'}} | "
-             f"Select-Object -ExpandProperty Id"],
-            capture_output=True, text=True, timeout=5,
-        )
-        pids = [int(p.strip()) for p in result.stdout.strip().split("\n") if p.strip().isdigit()]
-        return pids[0] if pids else None
-    except Exception:
-        return None
-
-
 class BotManager:
     def __init__(self):
         self._procs: dict[str, subprocess.Popen] = {}
         self._start_times: dict[str, float] = {}
+
+    def _get_lock_pid(self, name: str) -> int | None:
+        """Read PID from lock file."""
+        lock_file = LOCK_DIR / f"{name}.pid"
+        if not lock_file.exists():
+            return None
+        try:
+            return int(lock_file.read_text().strip())
+        except (ValueError, OSError):
+            return None
+
+    def _is_running(self, name: str) -> tuple[bool, int | None]:
+        """Check if bot is running via managed process OR lock file."""
+        # Check managed process first
+        proc = self._procs.get(name)
+        if proc is not None and proc.poll() is None:
+            return True, proc.pid
+
+        # Check lock file (catches terminal-launched processes)
+        pid = self._get_lock_pid(name)
+        if pid is not None and _is_pid_alive(pid):
+            return True, pid
+
+        return False, None
 
     def start(self, name: str) -> dict:
         if name not in BOT_CONFIGS:
@@ -62,8 +77,9 @@ class BotManager:
         if not cfg.get("controllable", True):
             return {"ok": False, "error": f"{cfg['label']} is read-only"}
 
-        if name in self._procs and self._procs[name].poll() is None:
-            return {"ok": False, "error": f"{name} already running (PID {self._procs[name].pid})"}
+        running, pid = self._is_running(name)
+        if running:
+            return {"ok": False, "error": f"{name} already running (PID {pid})"}
 
         script = str(PROJECT_ROOT / cfg["script"])
         log_path = str(PROJECT_ROOT / cfg["log"])
@@ -71,8 +87,10 @@ class BotManager:
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
 
+        cmd = [sys.executable, script] + cfg.get("extra_args", [])
+
         proc = subprocess.Popen(
-            [sys.executable, script],
+            cmd,
             stdout=open(log_path, "a"),
             stderr=subprocess.STDOUT,
             cwd=str(PROJECT_ROOT),
@@ -91,6 +109,7 @@ class BotManager:
         if not cfg.get("controllable", True):
             return {"ok": False, "error": f"{cfg['label']} is read-only"}
 
+        # Try managed process first
         if name in self._procs:
             proc = self._procs[name]
             if proc.poll() is None:
@@ -105,36 +124,38 @@ class BotManager:
                 self._start_times.pop(name, None)
                 logger.info("Stopped %s (PID %d)", name, pid)
                 return {"ok": True, "pid": pid}
-            else:
-                del self._procs[name]
+            del self._procs[name]
+
+        # Try lock file PID (externally launched)
+        pid = self._get_lock_pid(name)
+        if pid is not None and _is_pid_alive(pid):
+            try:
+                os.kill(pid, 15)  # SIGTERM
+                time.sleep(2)
+                if _is_pid_alive(pid):
+                    os.kill(pid, 9)  # force
+            except OSError:
+                pass
+            # Clean lock file
+            lock_file = LOCK_DIR / f"{name}.pid"
+            lock_file.unlink(missing_ok=True)
+            logger.info("Stopped external %s (PID %d)", name, pid)
+            return {"ok": True, "pid": pid}
 
         return {"ok": False, "error": f"{name} not running"}
 
     def restart(self, name: str) -> dict:
         self.stop(name)
-        time.sleep(1)
+        time.sleep(2)
         return self.start(name)
 
     def status(self) -> dict:
         result = {}
         for name, cfg in BOT_CONFIGS.items():
-            proc = self._procs.get(name)
-            managed_running = proc is not None and proc.poll() is None
-
-            # For uncontrollable bots, detect if running externally
-            if not managed_running and not cfg.get("controllable", True):
-                ext_pid = _find_process(cfg["script"].split("/")[-1])
-                running = ext_pid is not None
-                pid = ext_pid
-                uptime = 0
-            elif managed_running:
-                running = True
-                pid = proc.pid
-                uptime = int(time.time() - self._start_times.get(name, time.time()))
-            else:
-                running = False
-                pid = None
-                uptime = 0
+            running, pid = self._is_running(name)
+            uptime = 0
+            if running and name in self._start_times:
+                uptime = int(time.time() - self._start_times[name])
 
             result[name] = {
                 "label": cfg["label"],

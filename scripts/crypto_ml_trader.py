@@ -447,6 +447,7 @@ def main():
                 "model_weights": {k: round(v, 2) for k, v in weights.items()},
                 "daily_pnl_cents": daily_pnl,
                 "balance": round(c.get_balance(), 2) if scan_count % 10 == 0 else None,
+                "simulate": SIMULATE,
             }
             write_state(state)
 

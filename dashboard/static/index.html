@@ -167,7 +167,7 @@ tr:hover { background:rgba(0,229,255,0.03); }
 <div class="grid">
   <!-- CRYPTO VOTING -->
   <div class="panel">
-    <div class="panel-title">Crypto Voting Engine <span class="tag">BTC 15m</span></div>
+    <div class="panel-title">Crypto Voting Engine <span class="tag" id="crypto-mode-tag">BTC 15m</span></div>
     <div id="crypto-thinking">Waiting for data...</div>
   </div>
 
@@ -301,8 +301,23 @@ async function refresh() {
       if(logsRes.notification&&logsRes.notification.type==='trade') showNotification(logsRes.notification);
 
       if(cr.ticker) {
+        // Simulation mode indicator
+        const isSim = cr.simulate === true;
+        const modeTag = document.getElementById('crypto-mode-tag');
+        if(modeTag) {
+          if(isSim) {
+            modeTag.textContent = 'SIMULATION';
+            modeTag.style.background = 'var(--purple)';
+            modeTag.style.color = 'var(--bg)';
+          } else {
+            modeTag.textContent = 'BTC 15m';
+            modeTag.style.background = '';
+            modeTag.style.color = '';
+          }
+        }
+
         const clr=cr.prediction==='UP'?'var(--green)':cr.prediction==='DOWN'?'var(--red)':'var(--text-dim)';
-        const actClr={trading:'var(--green)',no_consensus:'var(--yellow)',monitoring:'var(--accent)',outside_window:'var(--text-dim)',already_traded:'var(--text-dim)',no_edge:'var(--yellow)',loss_limit_hit:'var(--red)'};
+        const actClr={trading:'var(--green)',simulated:'var(--purple)',no_consensus:'var(--yellow)',monitoring:'var(--accent)',outside_window:'var(--text-dim)',already_traded:'var(--text-dim)',no_edge:'var(--yellow)',loss_limit_hit:'var(--red)',balance_floor:'var(--red)'};
         const labels={xgboost:'XGB',momentum:'MOM',mean_reversion:'M·REV',kalshi_consensus:'KALSHI'};
         const mdls=cr.models||{};
 
@@ -319,19 +334,20 @@ async function refresh() {
 
         document.getElementById('crypto-thinking').innerHTML=`
           <div class="votes">${votesHtml}</div>
+          ${isSim ? '<div style="background:var(--purple);color:var(--bg);padding:3px 10px;border-radius:2px;font-size:10px;font-weight:700;letter-spacing:1px;margin-bottom:8px;display:inline-block">PAPER TRADING — NO REAL ORDERS</div>' : ''}
           <div class="result-bar">
             <div class="result-dir" style="color:${clr}">${cr.prediction==='UP'?'&#9650;':cr.prediction==='DOWN'?'&#9660;':'—'} ${cr.prediction}</div>
             <div class="result-badge" style="background:${agClr};color:var(--bg)">${typeof ag==='number'&&ag%1!==0?ag.toFixed(1):ag}/4</div>
             <div style="color:var(--text-dim);font-size:12px">${cr.confidence}%</div>
-            <div class="result-action" style="background:${actClr[cr.action]||'var(--text-dim)'};color:var(--bg)">${cr.action}</div>
+            <div class="result-action" style="background:${actClr[cr.action]||'var(--text-dim)'};color:var(--bg)">${isSim && cr.action==='trading' ? 'sim_trade' : cr.action}</div>
           </div>
           <div class="data-grid">
             <div class="label">BTC</div><div class="value" style="color:var(--text-bright)">$${cr.btc_price?cr.btc_price.toLocaleString():'—'}</div>
             <div class="label">Market</div><div class="value">${cr.ticker||'—'} (${Math.floor((cr.remaining_s||0)/60)}m${(cr.remaining_s||0)%60}s)</div>
             <div class="label">YES/NO</div><div class="value">${(cr.yes_ask*100).toFixed(0)}c / ${(cr.no_ask*100).toFixed(0)}c</div>
             <div class="label">Edge</div><div class="value">${cr.edge}%</div>
-            <div class="label">Today</div><div class="value">W${cr.wins||0}/L${cr.losses||0}</div>
-            <div class="label">P&L</div><div class="value ${(cr.daily_pnl_cents||0)>=0?'win':'loss'}">$${((cr.daily_pnl_cents||0)/100).toFixed(2)}</div>
+            <div class="label">${isSim ? 'Sim Trades' : 'Today'}</div><div class="value">W${cr.wins||0}/L${cr.losses||0}</div>
+            <div class="label">${isSim ? 'Sim P&L' : 'P&L'}</div><div class="value ${(cr.daily_pnl_cents||0)>=0?'win':'loss'}">$${((cr.daily_pnl_cents||0)/100).toFixed(2)}${isSim ? ' (paper)' : ''}</div>
           </div>
           <div style="color:var(--text-dim);font-size:9px;margin-top:6px">${fmtTime(cr.time)}</div>`;
       }
