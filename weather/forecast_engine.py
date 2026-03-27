@@ -213,14 +213,23 @@ class WeatherForecastEngine:
             temp_var = "temperature_2m_min" if temp_type == "low" else "temperature_2m_max"
             ensemble = self._get_cached_ensemble(city, target_date, temp_var)
 
+            # Apply city bias correction to ensemble members
+            from config.settings import CITY_BIAS_F
+            bias = CITY_BIAS_F.get(city.get("short", ""), 0.0)
+            if bias != 0.0 and ensemble.get("members"):
+                corrected = {"members": [m - bias for m in ensemble["members"]],
+                             "n_members": ensemble["n_members"]}
+            else:
+                corrected = ensemble
+
             if strike_type == "above":
-                prob = self.meteo.ensemble_prob_above(ensemble, strike_value)
+                prob = self.meteo.ensemble_prob_above(corrected, strike_value)
             elif strike_type == "below":
-                prob = self.meteo.ensemble_prob_below(ensemble, strike_value)
+                prob = self.meteo.ensemble_prob_below(corrected, strike_value)
             elif strike_type == "between":
                 low = strike_value - 0.5
                 high = strike_value + 0.5
-                prob = self.meteo.ensemble_prob_between(ensemble, low, high)
+                prob = self.meteo.ensemble_prob_between(corrected, low, high)
             else:
                 prob = 0.5
 

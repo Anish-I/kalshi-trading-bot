@@ -264,6 +264,15 @@ class WeatherTrader:
         for opp in opportunities[:max_trades]:
             ticker = opp["ticker"]
 
+            # --- Balance floor guardrail ---
+            try:
+                bal = self.kalshi_client.get_balance()
+                if bal < 10.0:
+                    logger.warning("Balance floor hit ($%.2f < $10). Stopping.", bal)
+                    break
+            except Exception:
+                pass
+
             # --- Risk gate ---
             can_trade, reason = self.risk_manager.can_trade()
             if not can_trade:

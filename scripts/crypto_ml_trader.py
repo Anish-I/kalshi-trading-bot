@@ -53,9 +53,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Config
 MAX_CONTRACTS = 30
-MAX_ENTRY_PRICE = 0.45  # Codex analysis: 38% accuracy only profits below ~35c
+MAX_ENTRY_PRICE = 0.45
 SCAN_INTERVAL = 30
-DAILY_LOSS_LIMIT_CENTS = 5000  # $15 daily loss limit
+DAILY_LOSS_LIMIT_CENTS = 1500  # $15 daily loss limit
+MIN_BALANCE_FLOOR = 10.0  # NEVER trade if balance drops below $10
 STATE_FILE = Path(settings.DATA_DIR) / "ml_trader_state.json"
 
 
@@ -319,10 +320,18 @@ def main():
             entry = 0.0
             edge = 0.0
 
+            # Balance floor guardrail
+            try:
+                current_bal = c.get_balance() if scan_count % 5 == 0 else None
+            except Exception:
+                current_bal = None
+
             if ticker in traded_tickers:
                 action = "already_traded"
             elif remaining < 120 or remaining > 780:
                 action = "outside_window"
+            elif current_bal is not None and current_bal < MIN_BALANCE_FLOOR:
+                action = "balance_floor"
             elif daily_pnl <= -DAILY_LOSS_LIMIT_CENTS:
                 action = "loss_limit_hit"
             elif agreement < 2:
