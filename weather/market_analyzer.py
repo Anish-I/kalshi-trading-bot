@@ -1,9 +1,13 @@
 """Weather market analyzer for finding edge on Kalshi temperature markets."""
 
+import json
 import logging
 import math
 import re
 from datetime import datetime, timezone
+from pathlib import Path
+
+from config.settings import settings, CITY_BIAS_F
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +86,43 @@ class WeatherMarketAnalyzer:
         return f"20{yr}-{mon}-{day}"
 
     # ------------------------------------------------------------------ #
+    #  Forecast snapshot persistence
+    # ------------------------------------------------------------------ #
+
+    def _save_forecast_snapshot(self, city: dict, target_date: str, ensemble: dict, mean: float, std: float):
+        """Persist forecast snapshot for honest backtesting later."""
+        snapshot_dir = Path(settings.DATA_DIR) / "weather_snapshots"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+        bias = CITY_BIAS_F.get(city.get("short", ""), 0.0)
+
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            lead_days = (datetime.strptime(target_date, "%Y-%m-%d") - datetime.strptime(today_str, "%Y-%m-%d")).days
+        except Exception:
+            lead_days = 0
+
+        record = {
+            "city_short": city.get("short", ""),
+            "market_type": city.get("type", "high"),
+            "target_date": target_date,
+            "issue_time_utc": datetime.now(timezone.utc).isoformat(),
+            "lead_days": lead_days,
+            "member_values_f": ensemble.get("members", []),
+            "mean_f": round(ensemble.get("mean", mean), 2),
+            "std_f": round(ensemble.get("std", std), 2),
+            "bias_adjusted_mean_f": round(mean - bias, 2),
+            "source": "open_meteo_gfs_31",
+            "n_members": ensemble.get("n_members", 0),
+        }
+
+        # Append to daily file
+        today_tag = datetime.now(timezone.utc).strftime("%Y%m%d")
+        path = snapshot_dir / f"{today_tag}.jsonl"
+        with open(path, "a") as f:
+            f.write(json.dumps(record, default=str) + "\n")
+
+    # ------------------------------------------------------------------ #
     #  Single-city scan
     # ------------------------------------------------------------------ #
 
@@ -143,6 +184,15 @@ class WeatherMarketAnalyzer:
             except Exception:
                 logger.error("Forecast failed for %s on %s, skipping date", city_name, date_key)
                 continue
+
+            # Save forecast snapshot once per city/date group
+            try:
+                temp_type = city.get("type", "high")
+                temp_var = "temperature_2m_min" if temp_type == "low" else "temperature_2m_max"
+                ensemble = self.engine._get_cached_ensemble(city, date_key, temp_var)
+                self._save_forecast_snapshot(city, date_key, ensemble, mean, std)
+            except Exception:
+                logger.debug("Snapshot save failed for %s/%s", city_name, date_key, exc_info=True)
 
             for mkt in date_markets:
                 ticker = mkt.get("ticker", "")

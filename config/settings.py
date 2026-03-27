@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     DAILY_LOSS_LIMIT_CENTS: int = 5000
     CONFIDENCE_THRESHOLD: float = 0.65
     CONSECUTIVE_LOSS_HALT: int = 5
+    COLLECTOR_STALE_SECONDS: int = 120
+    CRYPTO_LIVE_SESSIONS: str = "us_core"
 
     # Weather bot settings
     NWS_USER_AGENT: str = "KalshiWeatherBot (kalshi-weather-bot@example.com)"

@@ -44,6 +44,9 @@ from models.signal_models import (
     KalshiConsensusModel, vote,
 )
 from models.trade_journal import TradeJournal
+from engine.order_ledger import OrderLedger, OrderRecord
+from engine.collector_health import check_collector_freshness
+from engine.session_tags import get_session_tag, is_live_session
 
 logging.basicConfig(
     level=logging.INFO,
@@ -297,6 +300,7 @@ def main():
     _journal = journal
 
     c = KalshiClient()
+    ledger = OrderLedger(settings.DATA_DIR)
 
     # SAFETY: In simulate mode, block place_order at the client level
     if SIMULATE:
@@ -398,6 +402,17 @@ def main():
             except Exception:
                 current_bal = None
 
+            # Collector freshness check
+            collector = check_collector_freshness(settings.DATA_DIR, settings.COLLECTOR_STALE_SECONDS)
+            if not collector["healthy"]:
+                action = "collector_stale"
+
+            # Session tag
+            session = get_session_tag()
+            is_live = is_live_session(session, settings.CRYPTO_LIVE_SESSIONS)
+            # Force simulate if not in live session (even if --simulate not passed)
+            effective_simulate = SIMULATE or not is_live
+
             if ticker in traded_tickers:
                 action = "already_traded"
             elif remaining < 120 or remaining > 780:
@@ -440,6 +455,9 @@ def main():
                 "prediction": direction.upper(),
                 "agreement": agreement,
                 "confidence": round(combined_conf * 100, 1),
+                "collector_health": collector.get("healthy", True),
+                "collector_age_s": collector.get("age_seconds"),
+                "session_tag": session,
                 "kalshi_imbalance": round(kalshi_imb, 3),
                 "price_velocity": round(velocity * 100, 2),
                 "yes_ask": yes_ask,
@@ -500,6 +518,18 @@ def main():
                     traded_tickers.add(ticker)
                     trade_count += 1
 
+                    ledger.add(OrderRecord(
+                        strategy="crypto_sim",
+                        market_type="btc_15m",
+                        ticker=ticker,
+                        status="simulated",
+                        submitted_side=side,
+                        submitted_price_cents=price_cents,
+                        submitted_count=contracts,
+                        session_tag=session,
+                    ))
+                    ledger.save()
+
                     if journal.entries:
                         journal.entries[-1]["action"] = "simulated"
                         journal.entries[-1]["entry_price"] = price_cents
@@ -537,6 +567,21 @@ def main():
                             if order_id:
                                 resting_orders[ticker] = order_id
                             traded_tickers.add(ticker)
+
+                        ledger.add(OrderRecord(
+                            strategy="crypto",
+                            market_type="btc_15m",
+                            ticker=ticker,
+                            order_id=order.get("order", order).get("order_id", ""),
+                            status="filled" if status == "executed" else status,
+                            submitted_side=side,
+                            submitted_price_cents=price_cents,
+                            submitted_count=contracts,
+                            filled_price_cents=price_cents if status == "executed" else 0,
+                            filled_count=contracts if status == "executed" else 0,
+                            session_tag=session,
+                        ))
+                        ledger.save()
 
                         if journal.entries:
                             journal.entries[-1]["action"] = "executed" if status == "executed" else status

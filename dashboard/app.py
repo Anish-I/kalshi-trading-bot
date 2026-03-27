@@ -14,6 +14,7 @@ import json
 from kalshi.client import KalshiClient
 from dashboard.bot_manager import BotManager
 from config.settings import settings
+from engine.collector_health import check_collector_freshness
 
 app = FastAPI(title="Kalshi Trading Dashboard")
 kalshi = KalshiClient()
@@ -61,10 +62,13 @@ def get_status():
                 "updated": updated,
             })
 
+    collector = check_collector_freshness(str(DATA_DIR))
+
     return {
         "balance": balance,
         "positions": pos_list,
         "bots": bots.status(),
+        "collector_health": collector,
     }
 
 

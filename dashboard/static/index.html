@@ -288,7 +288,17 @@ async function refresh() {
       }
       return `<div class="bot-row"><div class="bot-info"><span class="dot ${b.running?'on':'off'}"></span><span class="bot-name">${b.label}</span><span class="bot-meta">${st}</span></div><div style="display:flex;gap:4px">${btns}</div></div>`;
     }).join('');
-    document.getElementById('bots-list').innerHTML=botsHtml;
+    // Collector health indicator
+    const ch = statusRes.collector_health || {};
+    const chAge = ch.age_seconds != null ? `${ch.age_seconds}s ago` : 'unknown';
+    const collectorRow = `<div class="bot-row" style="border-top:1px solid var(--border-hi);padding-top:6px;margin-top:4px">
+      <div class="bot-info">
+        <span class="dot ${ch.healthy ? 'on' : 'off'}"></span>
+        <span class="bot-name" style="font-size:11px">Data Feed</span>
+        <span class="bot-meta">${ch.healthy ? chAge : '<span style="color:var(--red)">STALE — ' + (ch.reason||'unknown') + '</span>'}</span>
+      </div>
+    </div>`;
+    document.getElementById('bots-list').innerHTML=botsHtml + collectorRow;
 
     // Positions
     const posHtml=statusRes.positions.length
@@ -358,7 +368,12 @@ async function refresh() {
             <div class="label">${isSim ? 'Sim Trades' : 'Today'}</div><div class="value">W${cr.wins||0}/L${cr.losses||0}</div>
             <div class="label">${isSim ? 'Sim P&L' : 'P&L'}</div><div class="value ${(cr.daily_pnl_cents||0)>=0?'win':'loss'}">$${((cr.daily_pnl_cents||0)/100).toFixed(2)}${isSim ? ' (paper)' : ''}</div>
           </div>
-          <div style="color:var(--text-dim);font-size:9px;margin-top:6px">${fmtTime(cr.time)}</div>`;
+          <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+            <span style="color:var(--text-dim);font-size:9px">${fmtTime(cr.time)}</span>
+            ${cr.session_tag ? '<span style="font-size:9px;padding:1px 5px;border-radius:2px;background:var(--border-hi);color:var(--text-dim)">'+cr.session_tag+'</span>' : ''}
+            <span class="dot ${ch.healthy ? 'on' : 'off'}" style="width:5px;height:5px" title="Data Feed: ${ch.healthy ? chAge : (ch.reason||'stale')}"></span>
+          </div>`;
+
       }
 
       if(wr.opportunities!==undefined) {
