@@ -1,5 +1,6 @@
 """Open-Meteo API client for Kalshi weather trading bot."""
 
+from collections import defaultdict
 import logging
 import statistics
 
@@ -13,6 +14,7 @@ class OpenMeteoClient:
 
     FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
     ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
+    PREVIOUS_RUNS_URL = "https://previous-runs-api.open-meteo.com/v1/forecast"
 
     def __init__(self):
         self._client = httpx.Client(timeout=30.0)
@@ -48,6 +50,49 @@ class OpenMeteoClient:
             })
 
         logger.info("Open-Meteo daily forecast for (%.4f, %.4f): %d days", lat, lon, len(results))
+        return results
+
+    def get_previous_run_daily_forecast(
+        self,
+        lat: float,
+        lon: float,
+        start_date: str,
+        end_date: str,
+        lead_days: int = 1,
+    ) -> list[dict]:
+        """Return archived prior-run daily highs/lows over a date range.
+
+        This uses the Previous Runs API and aggregates the hourly
+        ``temperature_2m_previous_dayN`` series into daily extrema, which lets us
+        answer questions like "what did yesterday's forecast say for today's
+        high/low?" without leaking the realized outcome into the forecast.
+        """
+        if lead_days < 1:
+            raise ValueError("lead_days must be >= 1")
+
+        variable = f"temperature_2m_previous_day{lead_days}"
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": variable,
+            "temperature_unit": "fahrenheit",
+            "timezone": "auto",
+            "start_date": start_date,
+            "end_date": end_date,
+        }
+
+        resp = self._client.get(self.PREVIOUS_RUNS_URL, params=params)
+        resp.raise_for_status()
+        hourly = resp.json().get("hourly", {})
+        results = self._aggregate_daily_temperatures(
+            hourly.get("time", []),
+            hourly.get(variable, []),
+        )
+
+        logger.info(
+            "Open-Meteo previous-run forecast for (%.4f, %.4f): %d days, lead=%d",
+            lat, lon, len(results), lead_days,
+        )
         return results
 
     # ------------------------------------------------------------------ #
@@ -178,6 +223,29 @@ class OpenMeteoClient:
         members = ensemble["members"]
         between = sum(1 for m in members if low <= m <= high)
         return between / len(members)
+
+    @staticmethod
+    def _aggregate_daily_temperatures(times: list[str], temps: list[float | None]) -> list[dict]:
+        """Aggregate an hourly temperature series into daily high/low values."""
+        by_date: dict[str, list[float]] = defaultdict(list)
+
+        for time_str, temp in zip(times, temps):
+            if temp is None:
+                continue
+            date_str = time_str.split("T", 1)[0]
+            by_date[date_str].append(float(temp))
+
+        results: list[dict] = []
+        for date_str in sorted(by_date):
+            values = by_date[date_str]
+            results.append({
+                "date": date_str,
+                "high_f": round(max(values), 2),
+                "low_f": round(min(values), 2),
+                "hour_count": len(values),
+            })
+
+        return results
 
     def _fetch_ensemble(self, lat: float, lon: float, target_date: str) -> dict:
         """Query the ensemble API and build the spread dict (legacy)."""

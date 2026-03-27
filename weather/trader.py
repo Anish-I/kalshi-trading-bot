@@ -1,7 +1,9 @@
 """Weather trading orchestrator — scan, trade, settle, and report."""
 
+import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 from kalshi.client import KalshiClient
 from engine.risk import RiskManager
@@ -10,15 +12,25 @@ from weather.nws_client import NWSClient
 from weather.open_meteo_client import OpenMeteoClient
 from weather.forecast_engine import WeatherForecastEngine
 from weather.market_analyzer import WeatherMarketAnalyzer
-from config.settings import WEATHER_CITIES, settings
+from config.settings import WEATHER_CITIES, CITY_TIERS, settings
 
 logger = logging.getLogger(__name__)
+
+
+def _get_city_tier(city_short: str) -> int:
+    for tier, cities in CITY_TIERS.items():
+        if city_short in cities:
+            return tier
+    return 2  # default to tier 2
 
 
 class WeatherTrader:
     """End-to-end weather trading bot: scan for edge, place trades, settle."""
 
     def __init__(self) -> None:
+        self._data_dir = Path(settings.DATA_DIR)
+        self._state_path = self._data_dir / "weather_tracker_state.json"
+
         # --- Kalshi API ---
         self.kalshi_client = KalshiClient()
 
@@ -30,7 +42,9 @@ class WeatherTrader:
         )
 
         # --- Position tracking ---
-        self.position_manager = PositionManager()
+        self.position_manager = PositionManager(
+            state_path=self._data_dir / "weather_positions.json",
+        )
 
         # --- Resting order tracking ---
         self._resting_orders: dict[str, tuple] = {}  # ticker -> (order_id, side, count, price)
@@ -52,6 +66,7 @@ class WeatherTrader:
         )
 
         self._last_reset_date: str = ""
+        self._load_state()
 
         logger.info(
             "WeatherTrader initialised  |  max_contracts=%d  daily_loss=%dc  "
@@ -60,6 +75,95 @@ class WeatherTrader:
             int(settings.DAILY_LOSS_LIMIT_CENTS * 0.4),
             settings.WEATHER_EDGE_THRESHOLD * 100,
         )
+
+    def _load_state(self) -> None:
+        """Restore resting orders and risk counters after a restart."""
+        if not self._state_path.exists():
+            return
+
+        try:
+            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("Failed to load weather tracker state from %s", self._state_path, exc_info=True)
+            return
+
+        self._resting_orders = {
+            ticker: (
+                data["order_id"],
+                data["side"],
+                int(data["count"]),
+                int(data["price"]),
+            )
+            for ticker, data in (payload.get("resting_orders") or {}).items()
+        }
+        self._last_reset_date = payload.get("last_reset_date", "") or ""
+        self.risk_manager.daily_pnl_cents = int(payload.get("daily_pnl_cents", 0) or 0)
+        self.risk_manager.consecutive_losses = int(payload.get("consecutive_losses", 0) or 0)
+        self.risk_manager.trades_today = payload.get("trades_today", []) or []
+        self.risk_manager.is_active = bool(payload.get("risk_active", True))
+        logger.info(
+            "Loaded weather tracker state: %d resting orders, %d open positions",
+            len(self._resting_orders),
+            len(self.position_manager.positions),
+        )
+
+    def _save_state(self) -> None:
+        payload = {
+            "resting_orders": {
+                ticker: {
+                    "order_id": order_id,
+                    "side": side,
+                    "count": count,
+                    "price": price,
+                }
+                for ticker, (order_id, side, count, price) in self._resting_orders.items()
+            },
+            "last_reset_date": self._last_reset_date,
+            "daily_pnl_cents": self.risk_manager.daily_pnl_cents,
+            "consecutive_losses": self.risk_manager.consecutive_losses,
+            "trades_today": self.risk_manager.trades_today,
+            "risk_active": self.risk_manager.is_active,
+        }
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self._state_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, default=str), encoding="utf-8")
+        tmp_path.replace(self._state_path)
+
+    @staticmethod
+    def _extract_fill_details(order_data: dict, fallback_count: int, fallback_price_cents: int) -> tuple[int, int]:
+        """Best-effort parse of Kalshi fill size and average fill price."""
+        count_value = (
+            order_data.get("fill_count")
+            or order_data.get("fill_count_fp")
+            or order_data.get("count")
+            or order_data.get("count_fp")
+            or fallback_count
+        )
+        try:
+            fill_count = int(round(float(count_value)))
+        except Exception:
+            fill_count = fallback_count
+        fill_count = max(fill_count, 1)
+
+        fill_price_cents = fallback_price_cents
+        for key, multiplier in (
+            ("average_fill_price", 1),
+            ("average_fill_price_dollars", 100),
+            ("yes_price", 1),
+            ("no_price", 1),
+            ("yes_price_dollars", 100),
+            ("no_price_dollars", 100),
+        ):
+            raw = order_data.get(key)
+            if raw is None:
+                continue
+            try:
+                fill_price_cents = int(round(float(raw) * multiplier))
+                break
+            except Exception:
+                continue
+
+        return fill_count, fill_price_cents
 
     # ------------------------------------------------------------------ #
     #  Resting order reconciliation
@@ -74,15 +178,14 @@ class WeatherTrader:
                 status = order_data.get("status", "")
                 if status == "executed":
                     # NOW open the position since it filled — use actual fill data
-                    fill_count = int(float(order_data.get("count", count)))
-                    fill_cost = order_data.get("average_fill_price", price)
+                    fill_count, fill_cost = self._extract_fill_details(order_data, count, price)
                     self.position_manager.open_position(
                         ticker=ticker, side=side, count=fill_count,
-                        entry_price_cents=int(float(str(fill_cost))),
+                        entry_price_cents=fill_cost,
                     )
                     resolved.append(ticker)
                     logger.info("Weather resting order FILLED + position opened: %s %s x%d @ %dc",
-                                ticker, side, fill_count, int(float(str(fill_cost))))
+                                ticker, side, fill_count, fill_cost)
                 elif status in ("canceled", "expired"):
                     resolved.append(ticker)
                     logger.info("Weather resting order %s: %s — no position", status, ticker)
@@ -90,6 +193,8 @@ class WeatherTrader:
                 pass
         for t in resolved:
             self._resting_orders.pop(t, None)
+        if resolved:
+            self._save_state()
 
     # ------------------------------------------------------------------ #
     #  Daily reset
@@ -101,8 +206,8 @@ class WeatherTrader:
             if self._last_reset_date:
                 logger.info("Weather daily reset")
             self.risk_manager.reset_daily()
-            self._resting_orders.clear()
             self._last_reset_date = today
+            self._save_state()
 
     # ------------------------------------------------------------------ #
     #  Scan
@@ -154,7 +259,7 @@ class WeatherTrader:
         list[dict]
             Records of executed trades.
         """
-        executed: list[dict] = []
+        submitted: list[dict] = []
 
         for opp in opportunities[:max_trades]:
             ticker = opp["ticker"]
@@ -174,6 +279,22 @@ class WeatherTrader:
             if self.position_manager.get_position(ticker) is not None or ticker in self._resting_orders:
                 logger.info("Already have open position on %s, skipping", ticker)
                 continue
+
+            # --- City tier sizing ---
+            city_short = opp.get("city_short", "")
+            tier = _get_city_tier(city_short)
+            if tier == 3:
+                logger.info("Skipping tier-3 city %s (MAE > 3.5F)", city_short)
+                continue
+            elif tier == 2:
+                contracts_per_trade = max(1, contracts_per_trade // 2)
+
+            # --- Bracket sizing ---
+            if opp.get("strike_type") == "between":
+                if opp["edge"] < 0.25:
+                    logger.info("Skipping bracket %s (edge %.0f%% < 25%%)", ticker, opp["edge"] * 100)
+                    continue
+                contracts_per_trade = max(1, contracts_per_trade // 3)
 
             # --- Build order ---
             side = opp["side"].lower()  # "yes" or "no"
@@ -210,18 +331,20 @@ class WeatherTrader:
             order_id = order_data.get("order_id", "")
 
             if status == "executed":
-                # Use actual fill data if available
-                fill_count = int(float(order_data.get("count", contracts_per_trade)))
-                fill_cost = order_data.get("average_fill_price", price_cents)
+                fill_count, fill_cost = self._extract_fill_details(
+                    order_data,
+                    contracts_per_trade,
+                    price_cents,
+                )
                 self.position_manager.open_position(
                     ticker=ticker, side=side, count=fill_count,
-                    entry_price_cents=int(float(str(fill_cost))),
+                    entry_price_cents=fill_cost,
                 )
             elif status == "resting" and order_id:
                 self._resting_orders[ticker] = (order_id, side, contracts_per_trade, price_cents)
                 logger.info("Weather order resting: %s (%s)", ticker, order_id)
 
-            executed.append({
+            submitted.append({
                 "ticker": ticker,
                 "side": side,
                 "price_cents": price_cents,
@@ -230,12 +353,16 @@ class WeatherTrader:
                 "city": opp.get("city", ""),
                 "model_prob": opp.get("model_prob", 0),
                 "market_mid": opp.get("market_mid", 0),
+                "status": status,
                 "order_response": order_resp,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
 
-        logger.info("Executed %d / %d possible trades", len(executed), len(opportunities))
-        return executed
+        if submitted:
+            self._save_state()
+
+        logger.info("Submitted %d / %d possible weather orders", len(submitted), len(opportunities))
+        return submitted
 
     # ------------------------------------------------------------------ #
     #  Settlement
@@ -309,6 +436,7 @@ class WeatherTrader:
                 "Settlement summary: %d closed, total P&L %+dc",
                 len(settled), sum(s["pnl_cents"] for s in settled),
             )
+            self._save_state()
 
         return settled
 
@@ -340,6 +468,7 @@ class WeatherTrader:
             "balance_usd": balance,
             "open_positions": open_positions,
             "open_position_count": len(open_positions),
+            "resting_order_count": len(self._resting_orders),
             "daily_pnl_cents": self.risk_manager.daily_pnl_cents,
             "realized_pnl_cents": self.position_manager.realized_pnl_cents,
             "consecutive_losses": self.risk_manager.consecutive_losses,

@@ -75,7 +75,7 @@ class WeatherMarketAnalyzer:
         match = re.search(r'-(\d{2})([A-Z]{3})(\d{2})-', ticker)
         if not match:
             return None
-        day, mon_str, yr = match.groups()
+        yr, mon_str, day = match.groups()
         months = {'JAN':'01','FEB':'02','MAR':'03','APR':'04','MAY':'05','JUN':'06',
                   'JUL':'07','AUG':'08','SEP':'09','OCT':'10','NOV':'11','DEC':'12'}
         mon = months.get(mon_str, '01')
@@ -192,6 +192,7 @@ class WeatherMarketAnalyzer:
                 opportunities.append({
                     "ticker": ticker,
                     "city": city_name,
+                    "city_short": city.get("short", ""),
                     "strike_type": strike_type,
                     "strike_low": strike_low,
                     "strike_high": strike_high,

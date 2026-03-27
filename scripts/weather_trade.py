@@ -70,10 +70,10 @@ def run_cycle(trader: WeatherTrader) -> None:
     cycle_start = datetime.now(timezone.utc).isoformat()
     logger.info("=== Cycle start: %s ===", cycle_start)
 
-    # 0. Daily reset + resting order reconciliation
+    # 0. Resting order reconciliation + daily reset
     try:
-        trader.daily_reset_if_needed()
         trader.check_resting_orders()
+        trader.daily_reset_if_needed()
     except Exception:
         logger.error("Pre-cycle checks failed", exc_info=True)
 
@@ -95,22 +95,31 @@ def run_cycle(trader: WeatherTrader) -> None:
     # 3. Execute trades if opportunities exist
     if opportunities:
         try:
-            executed = trader.execute_trades(opportunities)
-            if executed:
-                logger.info("Placed %d new trades", len(executed))
+            submitted = trader.execute_trades(opportunities)
+            if submitted:
+                filled = sum(1 for order in submitted if order.get("status") == "executed")
+                resting = sum(1 for order in submitted if order.get("status") == "resting")
+                logger.info(
+                    "Submitted %d new weather orders (%d filled, %d resting)",
+                    len(submitted),
+                    filled,
+                    resting,
+                )
         except Exception:
             logger.error("Trade execution failed", exc_info=True)
 
     # 4. Print status
+    status = {}
     try:
         status = trader.get_status()
         logger.info(
             "STATUS  balance=$%s  open=%d  daily_pnl=%+dc  trades_today=%d  "
-            "can_trade=%s  risk=%s",
+            "resting=%d  can_trade=%s  risk=%s",
             f"{status['balance_usd']:.2f}" if status["balance_usd"] is not None else "N/A",
             status["open_position_count"],
             status["daily_pnl_cents"],
             status["trades_today"],
+            status["resting_order_count"],
             status["can_trade"],
             status["risk_status"],
         )
@@ -130,6 +139,7 @@ def run_cycle(trader: WeatherTrader) -> None:
             "best_model_prob": round(opportunities[0].get("model_prob", 0) * 100, 1) if opportunities else 0,
             "best_market_mid": round(opportunities[0].get("market_mid", 0) * 100, 1) if opportunities else 0,
             "open_positions": status.get("open_position_count", 0),
+            "resting_orders": status.get("resting_order_count", 0),
             "daily_pnl_cents": status.get("daily_pnl_cents", 0),
             "trades_today": status.get("trades_today", 0),
             "balance": status.get("balance_usd"),

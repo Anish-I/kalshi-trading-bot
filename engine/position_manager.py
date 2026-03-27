@@ -1,7 +1,9 @@
 """Position tracking and P&L calculation for Kalshi binary contracts."""
 
+import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 
@@ -11,11 +13,48 @@ logger = logging.getLogger(__name__)
 class PositionManager:
     """Track open positions and compute realized P&L on Kalshi markets."""
 
-    def __init__(self):
+    def __init__(self, state_path: str | Path | None = None):
         # ticker -> {side, count, entry_price, timestamp}
         self.positions: dict[str, dict] = {}
         self.trade_log: list[dict] = []
         self.realized_pnl_cents: int = 0
+        self.state_path = Path(state_path) if state_path else None
+        self._load_state()
+
+    def _load_state(self) -> None:
+        """Restore persisted positions/trade log if configured."""
+        if self.state_path is None or not self.state_path.exists():
+            return
+
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("Failed to load position state from %s", self.state_path, exc_info=True)
+            return
+
+        self.positions = payload.get("positions", {}) or {}
+        self.trade_log = payload.get("trade_log", []) or []
+        self.realized_pnl_cents = int(payload.get("realized_pnl_cents", 0) or 0)
+        logger.info(
+            "Loaded position state: %d open positions, %+dc realized P&L",
+            len(self.positions),
+            self.realized_pnl_cents,
+        )
+
+    def save_state(self) -> None:
+        """Persist positions/trade log if configured."""
+        if self.state_path is None:
+            return
+
+        payload = {
+            "positions": self.positions,
+            "trade_log": self.trade_log,
+            "realized_pnl_cents": self.realized_pnl_cents,
+        }
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.state_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, default=str), encoding="utf-8")
+        tmp_path.replace(self.state_path)
 
     def open_position(
         self,
@@ -42,6 +81,7 @@ class PositionManager:
             "Position opened: %s %s x%d @ %dc",
             ticker, side, count, entry_price_cents,
         )
+        self.save_state()
 
     def close_position(self, ticker: str, settled_yes: bool) -> int:
         """Close a position after market settlement.
@@ -94,6 +134,7 @@ class PositionManager:
             "Position closed: %s %s x%d entry=%dc settled_yes=%s pnl=%+dc  total=%+dc",
             ticker, side, count, entry, settled_yes, pnl, self.realized_pnl_cents,
         )
+        self.save_state()
         return pnl
 
     def has_open_position(self) -> bool:

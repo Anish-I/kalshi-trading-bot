@@ -67,5 +67,20 @@ WEATHER_CITIES = [
     {"name": "Philadelphia Low", "short": "PHL-L", "lat": 39.8744, "lon": -75.2424, "series_ticker": "KXLOWTPHIL", "type": "low"},
 ]
 
+CITY_BIAS_F = {
+    "NYC": -2.81, "LA": -2.43, "CHI": -0.80, "MIA": -3.78,
+    "PHX": +0.39, "ATL": -4.11, "SFO": -1.20, "LV": +1.70,
+    "AUS": +0.52, "DEN": +0.15, "DAL": -0.95, "SEA": -3.42,
+    "DC": -1.55, "MIN": -1.20, "HOU": -1.85, "SAT": +0.30,
+    "BOS": -2.10, "NOLA": -1.65, "PHL": -2.30, "OKC": -0.70,
+    "NYC-L": -4.72, "LA-L": -1.15, "CHI-L": -2.90, "MIA-L": -2.45,
+    "DEN-L": -1.80, "AUS-L": +3.11, "PHL-L": -3.20,
+}
+
+CITY_TIERS = {
+    1: ["PHX", "DEN", "LV", "SAT", "DC"],
+    2: ["HOU", "NOLA", "CHI", "OKC", "AUS", "BOS", "SFO", "DAL", "MIN"],
+    3: ["NYC", "LA", "MIA", "ATL", "SEA", "NYC-L", "LA-L", "CHI-L", "MIA-L", "DEN-L", "AUS-L", "PHL-L"],
+}
 
 settings = Settings()

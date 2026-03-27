@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 
 from scipy.stats import norm
 
+from config.settings import CITY_BIAS_F
+
 logger = logging.getLogger(__name__)
 
 
@@ -16,13 +18,25 @@ class WeatherForecastEngine:
     def __init__(self, nws_client, meteo_client):
         self.nws = nws_client
         self.meteo = meteo_client
+        self._ensemble_cache: dict[tuple, dict] = {}
         # Forecast error standard deviation in degF by horizon (days out)
         self.error_std_by_horizon: dict[int, float] = {
-            0: 1.5,
-            1: 2.5,
-            2: 3.5,
-            3: 4.5,
+            0: 2.5,
+            1: 4.0,
+            2: 4.5,
+            3: 5.5,
         }
+
+    def _get_cached_ensemble(self, city, target_date, daily_var):
+        key = (city.get("series_ticker", ""), target_date, daily_var)
+        if key not in self._ensemble_cache:
+            self._ensemble_cache[key] = self.meteo.get_gfs_ensemble(
+                city["lat"], city["lon"], target_date, daily_var=daily_var
+            )
+        return self._ensemble_cache[key]
+
+    def clear_cache(self):
+        self._ensemble_cache.clear()
 
     # ------------------------------------------------------------------ #
     #  Forecast retrieval
@@ -81,6 +95,10 @@ class WeatherForecastEngine:
         else:
             raise ValueError(f"No forecast data available for {name} on {target_date}")
 
+        # --- Bias correction ---
+        bias = CITY_BIAS_F.get(city.get("short", ""), 0.0)
+        forecast_mean -= bias
+
         # --- Forecast uncertainty ---
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         horizon_days = (datetime.strptime(target_date, "%Y-%m-%d") - datetime.strptime(today, "%Y-%m-%d")).days
@@ -130,6 +148,10 @@ class WeatherForecastEngine:
             forecast_mean = meteo_low
         else:
             raise ValueError(f"No low temp forecast for {name} on {target_date}")
+
+        # --- Bias correction ---
+        bias = CITY_BIAS_F.get(city.get("short", ""), 0.0)
+        forecast_mean -= bias
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         horizon_days = (datetime.strptime(target_date, "%Y-%m-%d") - datetime.strptime(today, "%Y-%m-%d")).days
@@ -189,7 +211,7 @@ class WeatherForecastEngine:
         try:
             temp_type = city.get("type", "high")
             temp_var = "temperature_2m_min" if temp_type == "low" else "temperature_2m_max"
-            ensemble = self.meteo.get_gfs_ensemble(city["lat"], city["lon"], target_date, daily_var=temp_var)
+            ensemble = self._get_cached_ensemble(city, target_date, temp_var)
 
             if strike_type == "above":
                 prob = self.meteo.ensemble_prob_above(ensemble, strike_value)

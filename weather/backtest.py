@@ -101,9 +101,9 @@ class WeatherBacktest:
         if not match:
             return None
 
-        day = int(match.group(1))
+        year = 2000 + int(match.group(1))
         month_str = match.group(2)
-        year = 2000 + int(match.group(3))
+        day = int(match.group(3))
 
         months = {
             "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
