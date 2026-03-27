@@ -115,16 +115,17 @@ class ProcessLock:
             if _is_pid_alive(old_pid):
                 logger.warning("Killing existing %s (PID %d)", self.name, old_pid)
                 try:
-                    os.kill(old_pid, signal.SIGTERM)
-                    # Wait briefly for graceful shutdown
+                    if sys.platform == "win32":
+                        import subprocess
+                        subprocess.run(["taskkill", "/F", "/PID", str(old_pid)],
+                                       capture_output=True, timeout=10)
+                    else:
+                        os.kill(old_pid, signal.SIGTERM)
                     import time
                     for _ in range(10):
                         if not _is_pid_alive(old_pid):
                             break
                         time.sleep(0.5)
-                    # Force kill if still alive
-                    if _is_pid_alive(old_pid):
-                        os.kill(old_pid, signal.SIGTERM)  # Windows doesn't have SIGKILL
                 except OSError:
                     pass
                 self.lock_file.unlink(missing_ok=True)
