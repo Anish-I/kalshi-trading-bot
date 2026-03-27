@@ -15,6 +15,7 @@ from kalshi.client import KalshiClient
 from dashboard.bot_manager import BotManager
 from config.settings import settings
 from engine.collector_health import check_collector_freshness
+from engine.order_ledger import OrderLedger
 
 app = FastAPI(title="Kalshi Trading Dashboard")
 kalshi = KalshiClient()
@@ -64,11 +65,15 @@ def get_status():
 
     collector = check_collector_freshness(str(DATA_DIR))
 
+    ledger = OrderLedger(str(DATA_DIR))
+
     return {
         "balance": balance,
         "positions": pos_list,
         "bots": bots.status(),
         "collector_health": collector,
+        "resting_orders": len(ledger.get_open_orders()),
+        "ledger_stats": ledger.get_stats(),
     }
 
 

@@ -171,7 +171,7 @@ def get_kalshi_orderbook(c, ticker):
     return 0.0
 
 
-def check_resting_orders(c):
+def check_resting_orders(c, ledger=None):
     global trade_count, traded_tickers, resting_orders
     resolved = []
     for ticker, order_id in resting_orders.items():
@@ -181,9 +181,13 @@ def check_resting_orders(c):
             status = order_data.get("status", "")
             if status == "executed":
                 trade_count += 1
+                ledger.update_status(ticker, "filled")
+                ledger.save()
                 resolved.append(ticker)
                 log.info("Resting order FILLED: %s (%s)", ticker, order_id)
             elif status in ("canceled", "expired"):
+                ledger.update_status(ticker, "cancelled")
+                ledger.save()
                 traded_tickers.discard(ticker)
                 resolved.append(ticker)
                 log.info("Resting order %s: %s (%s) — freed for retry",
@@ -197,7 +201,7 @@ def check_resting_orders(c):
 _journal: TradeJournal | None = None  # set in main()
 
 
-def check_settlements(c):
+def check_settlements(c, ledger=None):
     global daily_pnl, win_count, loss_count, settled_tickers
 
     if SIMULATE:
@@ -240,6 +244,10 @@ def check_settlements(c):
                 log.info("SIM SETTLED [%s] %s %s @ %dc pnl=%+dc total=%+dc",
                          "WIN" if won else "LOSS", ticker, sim_side.upper(), sim_price, pnl, daily_pnl)
 
+                if ledger:
+                    ledger.settle(ticker, result_val, pnl)
+                    ledger.save()
+
                 if _sim_trade_log:
                     with open(_sim_trade_log, "a") as f:
                         f.write(f"{datetime.now(timezone.utc).isoformat()} SETTLED {'WIN' if won else 'LOSS'} {sim_side.upper()} {ticker} @ {sim_price}c pnl={pnl:+d}c total={daily_pnl:+d}c W{win_count}/L{loss_count}\n")
@@ -279,6 +287,9 @@ def check_settlements(c):
             settled_tickers.add(ticker)
             log.info("SETTLED [%s] %s %s x%.0f pnl=%+dc total=%+dc",
                       "WIN" if won else "LOSS", ticker, side, ct, pnl, daily_pnl)
+            if ledger:
+                ledger.settle(ticker, mkt_result, pnl)
+                ledger.save()
             # Feed outcome back to journal
             if _journal is not None:
                 _journal.log_outcome(ticker, won, pnl)
@@ -337,8 +348,8 @@ def main():
         try:
             scan_count += 1
 
-            check_resting_orders(c)
-            check_settlements(c)
+            check_resting_orders(c, ledger)
+            check_settlements(c, ledger)
 
             # Daily risk reset
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -349,8 +360,6 @@ def main():
                 win_count = 0
                 loss_count = 0
                 trade_count = 0
-                traded_tickers.clear()
-                resting_orders.clear()
                 last_reset_date = today
 
             market = tracker.get_next_market()
@@ -523,7 +532,7 @@ def main():
                 bet_cents = bet_dollars * 100
                 contracts = max(1, min(MAX_CONTRACTS, bet_cents // price_cents))
 
-                if SIMULATE:
+                if effective_simulate:
                     # --- SIMULATION MODE: log but don't place ---
                     log.info(
                         ">>> SIM TRADE: %s %s @ %dc x%d ($%d) | %.0f/4 agree | edge=%.0f%%",

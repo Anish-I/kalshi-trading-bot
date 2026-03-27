@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     WEATHER_EDGE_THRESHOLD: float = 0.15
     WEATHER_MAX_CONTRACTS: int = 25
     WEATHER_SCAN_INTERVAL_MINUTES: int = 15
+    WEATHER_TIER1_SIZE_MULTIPLIER: float = 1.0
+    WEATHER_TIER2_SIZE_MULTIPLIER: float = 0.5
+    WEATHER_TIER3_LIVE_ENABLED: bool = False
 
     # Coinbase CDP API Key (for authenticated WebSocket)
     COINBASE_CDP_KEY_ID: str = ""

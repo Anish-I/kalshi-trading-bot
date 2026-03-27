@@ -13,6 +13,7 @@ from weather.open_meteo_client import OpenMeteoClient
 from weather.forecast_engine import WeatherForecastEngine
 from weather.market_analyzer import WeatherMarketAnalyzer
 from config.settings import WEATHER_CITIES, CITY_TIERS, settings
+from engine.order_ledger import OrderLedger, OrderRecord
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,9 @@ class WeatherTrader:
         self.position_manager = PositionManager(
             state_path=self._data_dir / "weather_positions.json",
         )
+
+        # --- Order ledger ---
+        self.ledger = OrderLedger(str(self._data_dir))
 
         # --- Resting order tracking ---
         self._resting_orders: dict[str, tuple] = {}  # ticker -> (order_id, side, count, price)
@@ -186,6 +190,8 @@ class WeatherTrader:
                     resolved.append(ticker)
                     logger.info("Weather resting order FILLED + position opened: %s %s x%d @ %dc",
                                 ticker, side, fill_count, fill_cost)
+                    self.ledger.update_status(ticker, "filled", filled_price_cents=fill_cost, filled_count=fill_count)
+                    self.ledger.save()
                 elif status in ("canceled", "expired"):
                     resolved.append(ticker)
                     logger.info("Weather resting order %s: %s — no position", status, ticker)
@@ -349,9 +355,14 @@ class WeatherTrader:
                     ticker=ticker, side=side, count=fill_count,
                     entry_price_cents=fill_cost,
                 )
+                city_type = opp.get("strike_type", "")
+                self.ledger.add(OrderRecord(strategy="weather", market_type=f"weather_{city_type}", ticker=ticker, order_id=order_id, status="filled", submitted_side=side, submitted_price_cents=price_cents, submitted_count=fill_count, filled_price_cents=fill_cost, filled_count=fill_count))
+                self.ledger.save()
             elif status == "resting" and order_id:
                 self._resting_orders[ticker] = (order_id, side, contracts_per_trade, price_cents)
                 logger.info("Weather order resting: %s (%s)", ticker, order_id)
+                self.ledger.add(OrderRecord(strategy="weather", market_type=f"weather_{opp.get('strike_type','')}", ticker=ticker, order_id=order_id, status="resting", submitted_side=side, submitted_price_cents=price_cents, submitted_count=contracts_per_trade))
+                self.ledger.save()
 
             submitted.append({
                 "ticker": ticker,
@@ -414,6 +425,9 @@ class WeatherTrader:
 
             # Close position and compute P&L
             pnl = self.position_manager.close_position(ticker, settled_yes)
+
+            self.ledger.settle(ticker, result, pnl)
+            self.ledger.save()
 
             # Record in risk manager
             trade_info = {
