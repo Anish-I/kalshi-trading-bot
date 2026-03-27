@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     CONSECUTIVE_LOSS_HALT: int = 5
     COLLECTOR_STALE_SECONDS: int = 120
     CRYPTO_LIVE_SESSIONS: str = "us_core"
+    CRYPTO_DECISION_MODE: str = "calibrated_ev"
+    CRYPTO_CALIBRATION_PATH: str = "D:/kalshi-models/crypto_conjunction_calibration.json"
+    CRYPTO_CALIBRATION_MIN_TRADES: int = 50
+    CRYPTO_EV_BUFFER_CENTS: float = 2.0
+    CRYPTO_MIN_NET_EV_CENTS: float = 1.0
 
     # Weather bot settings
     NWS_USER_AGENT: str = "KalshiWeatherBot (kalshi-weather-bot@example.com)"

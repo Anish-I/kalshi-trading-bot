@@ -213,7 +213,7 @@ tr:hover { background:rgba(0,229,255,0.03); }
 
 <div class="footer">
   <span id="last-updated"></span>
-  <span>KALSHI TERMINAL v3 | 32 features | 4-model voting | adaptive weights</span>
+  <span>KALSHI TERMINAL v3 | XGB+Momentum conjunction | calibrated EV in SIM | 32 real features</span>
 </div>
 
 <script>
@@ -336,8 +336,10 @@ async function refresh() {
         }
 
         const clr=cr.prediction==='UP'?'var(--green)':cr.prediction==='DOWN'?'var(--red)':'var(--text-dim)';
-        const actClr={trading:'var(--green)',simulated:'var(--purple)',no_consensus:'var(--text-dim)',monitoring:'var(--accent)',outside_window:'var(--text-dim)',already_traded:'var(--text-dim)',no_edge:'var(--yellow)',loss_limit_hit:'var(--red)',balance_floor:'var(--red)',collector_stale:'var(--red)'};
+        const actClr={trading:'var(--green)',simulated:'var(--purple)',no_consensus:'var(--text-dim)',monitoring:'var(--accent)',outside_window:'var(--text-dim)',already_traded:'var(--text-dim)',no_edge:'var(--yellow)',no_calibration:'var(--orange)',loss_limit_hit:'var(--red)',balance_floor:'var(--red)',collector_stale:'var(--red)'};
         const mdls=cr.models||{};
+        const calSummary = cr.calibration_summary || {};
+        const fmtBucket = (bucket) => typeof bucket === 'number' ? `${bucket}c` : (bucket || '—');
 
         // Show XGB + MOM as the decision pair, MR + Kalshi as info-only
         const xgb = mdls.xgboost||{vote:'FLAT',confidence:0};
@@ -363,6 +365,19 @@ async function refresh() {
         const agreed = cr.agreement >= 2;
         const agreeText = agreed ? 'XGB + MOM AGREE' : 'no agreement';
         const agClr = agreed ? 'var(--green)' : 'var(--text-dim)';
+        const pWinPct = cr.calibrated_p_win != null ? `${(cr.calibrated_p_win * 100).toFixed(1)}%` : '—';
+        const grossEvText = cr.gross_ev_cents_per_contract != null ? `${cr.gross_ev_cents_per_contract >= 0 ? '+' : ''}${cr.gross_ev_cents_per_contract.toFixed(1)}c` : '—';
+        const netEvText = cr.net_ev_cents_per_contract != null ? `${cr.net_ev_cents_per_contract >= 0 ? '+' : ''}${cr.net_ev_cents_per_contract.toFixed(1)}c` : '—';
+        const calBadge = cr.decision_mode === 'calibrated_ev'
+          ? '<span style="font-size:9px;padding:1px 5px;border-radius:2px;background:var(--purple);color:var(--bg)">calibrated EV</span>'
+          : '<span style="font-size:9px;padding:1px 5px;border-radius:2px;background:var(--border-hi);color:var(--text-dim)">legacy</span>';
+        const calSummaryHtml = calSummary.exists
+          ? `<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);font-size:10px;color:var(--text-dim)">
+              calibration ${calSummary.version || 'artifact'} | tradable buckets ${calSummary.tradable_buckets || 0}
+              ${calSummary.best_bucket ? `| best ${calSummary.best_bucket.side.toUpperCase()} ${fmtBucket(calSummary.best_bucket.price_bucket)} (${calSummary.best_bucket.gross_ev_cents_per_contract >= 0 ? '+' : ''}${Number(calSummary.best_bucket.gross_ev_cents_per_contract).toFixed(1)}c)` : ''}
+              ${calSummary.generated_at ? `| ${fmtTime(calSummary.generated_at)}` : ''}
+            </div>`
+          : '<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);font-size:10px;color:var(--orange)">calibration artifact missing</div>';
 
         document.getElementById('crypto-thinking').innerHTML=`
           ${isSim ? '<div style="background:var(--purple);color:var(--bg);padding:3px 10px;border-radius:2px;font-size:10px;font-weight:700;letter-spacing:1px;margin-bottom:8px;display:inline-block">PAPER TRADING</div>' : ''}
@@ -372,11 +387,17 @@ async function refresh() {
             <div class="result-badge" style="background:${agClr};color:var(--bg)">${agreeText}</div>
             <div style="color:var(--text-dim);font-size:12px">${cr.confidence}%</div>
             <div class="result-action" style="background:${actClr[cr.action]||'var(--text-dim)'};color:var(--bg)">${cr.action}</div>
+            ${calBadge}
           </div>
           <div class="data-grid">
             <div class="label">BTC</div><div class="value" style="color:var(--text-bright)">$${cr.btc_price?cr.btc_price.toLocaleString():'—'}</div>
             <div class="label">Market</div><div class="value">${cr.ticker||'—'} (${Math.floor((cr.remaining_s||0)/60)}m${(cr.remaining_s||0)%60}s)</div>
             <div class="label">YES/NO</div><div class="value">${(cr.yes_ask*100).toFixed(0)}c / ${(cr.no_ask*100).toFixed(0)}c</div>
+            <div class="label">Bucket</div><div class="value">${cr.price_bucket || '—'} ${cr.bucket_tradable ? '<span style="color:var(--green)">tradable</span>' : ''}</div>
+            <div class="label">P(win)</div><div class="value">${pWinPct}</div>
+            <div class="label">Gross EV</div><div class="value ${cr.gross_ev_cents_per_contract >= 0 ? 'win' : 'loss'}">${grossEvText}</div>
+            <div class="label">Net EV</div><div class="value ${cr.net_ev_cents_per_contract >= 0 ? 'win' : 'loss'}">${netEvText}</div>
+            <div class="label">Bucket N</div><div class="value">${cr.bucket_trade_count || 0}</div>
             <div class="label">Edge</div><div class="value">${cr.edge}%</div>
             <div class="label">${isSim ? 'Sim Trades' : 'Today'}</div><div class="value">W${cr.wins||0}/L${cr.losses||0}</div>
             <div class="label">${isSim ? 'Sim P&L' : 'P&L'}</div><div class="value ${(cr.daily_pnl_cents||0)>=0?'win':'loss'}">$${((cr.daily_pnl_cents||0)/100).toFixed(2)}${isSim ? ' (paper)' : ''}</div>
@@ -385,7 +406,8 @@ async function refresh() {
             <span style="color:var(--text-dim);font-size:9px">${fmtTime(cr.time)}</span>
             ${cr.session_tag ? '<span style="font-size:9px;padding:1px 5px;border-radius:2px;background:var(--border-hi);color:var(--text-dim)">'+cr.session_tag+'</span>' : ''}
             <span class="dot ${ch.healthy ? 'on' : 'off'}" style="width:5px;height:5px" title="Data Feed: ${ch.healthy ? chAge : (ch.reason||'stale')}"></span>
-          </div>`;
+          </div>
+          ${calSummaryHtml}`;
 
       }
 

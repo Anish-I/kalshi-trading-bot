@@ -46,6 +46,13 @@ from models.signal_models import (
 from models.trade_journal import TradeJournal
 from engine.order_ledger import OrderLedger, OrderRecord
 from engine.collector_health import check_collector_freshness
+from engine.crypto_decision import (
+    calibration_summary_view,
+    evaluate_calibrated_trade,
+    gross_ev_cents_per_contract,
+    load_crypto_calibration,
+    price_bucket_label,
+)
 from engine.session_tags import get_session_tag, is_live_session
 
 _log_file = "crypto_sim.log" if _pre_parsed.simulate else "crypto_live.log"
@@ -306,13 +313,20 @@ def write_state(state):
         pass
 
 
+def build_signal_ref(decision_mode: str, calibration_version: str, side: str | None, price_bucket: str | None) -> str:
+    if decision_mode == "calibrated_ev" and side and price_bucket:
+        version = calibration_version or "unknown"
+        return f"cal:{version}:{side}:{price_bucket}"
+    return "legacy:xgb_momentum_conjunction"
+
+
 def main():
     log.info("=" * 60)
     if SIMULATE:
         log.info("  CRYPTO ML TRADER v3 -- SIMULATION MODE (no real orders)")
     else:
         log.info("  CRYPTO ML TRADER v3 -- LIVE MODE")
-    log.info("  Models: XGBoost + Momentum + MeanReversion + KalshiConsensus")
+    log.info("  Rule: XGBoost + Momentum conjunction")
     log.info("=" * 60)
 
     # Initialize models
@@ -327,6 +341,9 @@ def main():
 
     c = KalshiClient()
     ledger = OrderLedger(settings.DATA_DIR)
+    calibration = load_crypto_calibration(settings.CRYPTO_CALIBRATION_PATH)
+    calibration_summary = calibration_summary_view(calibration)
+    configured_decision_mode = (settings.CRYPTO_DECISION_MODE or "calibrated_ev").strip().lower()
 
     # SAFETY: In simulate mode, block place_order at the client level
     if SIMULATE:
@@ -340,6 +357,15 @@ def main():
     log.info("Journal: %d entries, weights=%s",
              len(journal.entries),
              {k: f"{v:.2f}" for k, v in journal.get_model_weights().items()})
+    if calibration.get("exists"):
+        log.info(
+            "Calibration: %s | tradable=%s | generated=%s",
+            calibration.get("path"),
+            calibration_summary.get("tradable_buckets", 0),
+            calibration_summary.get("generated_at", ""),
+        )
+    else:
+        log.warning("Calibration artifact missing at %s", settings.CRYPTO_CALIBRATION_PATH)
 
     global traded_tickers, daily_pnl, trade_count, win_count, loss_count, last_reset_date, resting_orders
     scan_count = 0
@@ -347,6 +373,10 @@ def main():
     while True:
         try:
             scan_count += 1
+
+            if scan_count == 1 or scan_count % 20 == 0:
+                calibration = load_crypto_calibration(settings.CRYPTO_CALIBRATION_PATH)
+                calibration_summary = calibration_summary_view(calibration)
 
             check_resting_orders(c, ledger)
             check_settlements(c, ledger)
@@ -400,9 +430,10 @@ def main():
 
             # --- XGB + Momentum conjunction (only tradeable signal) ---
             # MR and Kalshi kept for dashboard display only, not alpha
+            legacy_probability = 0.485
             if xgb_vote == mom_vote and xgb_vote != "flat":
                 direction = xgb_vote
-                confidence = 0.485  # empirical P(win | XGB+MOM agree) from 90-day backtest
+                confidence = legacy_probability
                 agreement = 2
             else:
                 direction = "flat"
@@ -414,6 +445,13 @@ def main():
             side = None
             entry = 0.0
             edge = 0.0
+            price_bucket = None
+            entry_price_cents = 0
+            calibrated_p_win = None
+            gross_ev_cents = None
+            net_ev_cents = None
+            bucket_trade_count = 0
+            bucket_tradable = False
 
             # Guardrails
             try:
@@ -425,6 +463,7 @@ def main():
             session = get_session_tag()
             is_live = is_live_session(session, settings.CRYPTO_LIVE_SESSIONS)
             effective_simulate = SIMULATE or not is_live
+            decision_mode = configured_decision_mode if effective_simulate else "legacy_conjunction"
 
             if not collector["healthy"]:
                 action = "collector_stale"
@@ -438,21 +477,55 @@ def main():
                 action = "loss_limit_hit"
             elif agreement < 2:
                 action = "no_consensus"
-            elif direction == "up" and 0 < yes_ask <= MAX_ENTRY_PRICE:
-                side = "yes"
-                entry = yes_ask
-                edge = confidence - yes_ask
-                if edge > SIM_MIN_EDGE:
-                    action = "trading"
-            elif direction == "down" and 0 < no_ask <= MAX_ENTRY_PRICE:
-                side = "no"
-                entry = no_ask
-                edge = confidence - no_ask
-                if edge > SIM_MIN_EDGE:
-                    action = "trading"
+            else:
+                if direction == "up" and 0 < yes_ask <= MAX_ENTRY_PRICE:
+                    side = "yes"
+                    entry = yes_ask
+                elif direction == "down" and 0 < no_ask <= MAX_ENTRY_PRICE:
+                    side = "no"
+                    entry = no_ask
+
+                if side:
+                    entry_price_cents = int(round(entry * 100))
+                    price_bucket = price_bucket_label(entry_price_cents)
+
+                    if decision_mode == "calibrated_ev":
+                        decision = evaluate_calibrated_trade(
+                            calibration,
+                            side,
+                            entry_price_cents,
+                            min_trades=settings.CRYPTO_CALIBRATION_MIN_TRADES,
+                            ev_buffer_cents=settings.CRYPTO_EV_BUFFER_CENTS,
+                            min_net_ev_cents=settings.CRYPTO_MIN_NET_EV_CENTS,
+                        )
+                        price_bucket = decision["price_bucket"]
+                        if decision["status"] != "no_calibration":
+                            calibrated_p_win = float(decision["calibrated_p_win"])
+                            confidence = calibrated_p_win
+                            bucket_trade_count = int(decision["bucket_trade_count"])
+                            bucket_tradable = bool(decision["bucket_tradable"])
+                            gross_ev_cents = float(decision["gross_ev_cents_per_contract"])
+                            net_ev_cents = float(decision["net_ev_cents_per_contract"])
+                            edge = calibrated_p_win - entry
+                            action = decision["status"]
+                        else:
+                            action = "no_calibration"
+                    else:
+                        calibrated_p_win = legacy_probability
+                        confidence = calibrated_p_win
+                        gross_ev_cents = gross_ev_cents_per_contract(calibrated_p_win, entry_price_cents)
+                        net_ev_cents = gross_ev_cents - float(settings.CRYPTO_EV_BUFFER_CENTS)
+                        edge = calibrated_p_win - entry
+                        if edge > SIM_MIN_EDGE:
+                            action = "trading"
+                        else:
+                            action = "no_edge"
+                else:
+                    action = "no_edge"
 
             if action != "trading" and side:
-                action = "no_edge"
+                if decision_mode == "calibrated_ev" and action not in ("no_edge", "no_calibration"):
+                    action = "no_edge"
 
             # --- Write state for dashboard ---
             state = {
@@ -482,7 +555,19 @@ def main():
                 "trades_today": trade_count,
                 "wins": win_count,
                 "losses": loss_count,
-                "rule": "xgb+mom conjunction",
+                "rule": "xgb+mom calibrated_ev" if decision_mode == "calibrated_ev" else "xgb+mom conjunction",
+                "decision_mode": decision_mode,
+                "price_bucket": price_bucket,
+                "entry_side": side,
+                "entry_price_cents": entry_price_cents,
+                "calibrated_p_win": round(calibrated_p_win, 4) if calibrated_p_win is not None else None,
+                "gross_ev_cents_per_contract": round(gross_ev_cents, 3) if gross_ev_cents is not None else None,
+                "net_ev_cents_per_contract": round(net_ev_cents, 3) if net_ev_cents is not None else None,
+                "bucket_trade_count": bucket_trade_count,
+                "bucket_tradable": bucket_tradable,
+                "calibration_version": calibration.get("version", ""),
+                "calibration_generated_at": calibration.get("generated_at", ""),
+                "calibration_summary": calibration_summary,
                 "daily_pnl_cents": daily_pnl,
                 "balance": round(c.get_balance(), 2) if scan_count % 10 == 0 else None,
                 "simulate": effective_simulate,
@@ -492,13 +577,16 @@ def main():
             # --- Log ---
             votes_str = f"XGB={xgb_vote[0].upper()} MOM={mom_vote[0].upper()} MR={mr_vote[0].upper()} KAL={kalshi_vote[0].upper()}"
             log.info(
-                "%s | %s %d/4 %.0f%% | %s | BTC=$%s mkt=%.0fc | edge=%.0f%% | %s | W%d/L%d $%.2f",
+                "%s | %s %d/4 %.0f%% | %s | BTC=$%s mkt=%.0fc | edge=%.0f%% | %s | %s%s | W%d/L%d $%.2f",
                 ticker[-8:], direction.upper(), agreement, confidence * 100,
                 votes_str,
                 f"{btc:,.0f}" if btc else "?",
                 market_mid * 100,
                 edge * 100 if side else 0,
-                action, win_count, loss_count, daily_pnl / 100,
+                action,
+                decision_mode,
+                f" | EV={net_ev_cents:+.1f}c" if net_ev_cents is not None else "",
+                win_count, loss_count, daily_pnl / 100,
             )
 
             # --- Journal every trade decision (not monitoring/outside_window) ---
@@ -509,31 +597,47 @@ def main():
                 "kalshi_consensus": {"vote": kalshi_vote.upper(), "confidence": round(kalshi_conf * 100, 1)},
             }
             if action == "trading":
+                contracts = 10  # fixed 10 contracts per trade
+                bet_dollars = contracts * entry_price_cents / 100
                 journal.log_decision(
                     ticker=ticker, btc_price=btc or 0, models=models_dict,
                     vote_result=direction.upper(), agreement=agreement, action="pending",
-                    side=side, edge=round(edge, 4) if side else None,
+                    side=side, entry_price=entry_price_cents, contracts=contracts,
+                    bet_dollars=bet_dollars, edge=round(edge, 4) if side else None,
                     features_snapshot=last_row if last_row else None,
+                    session_tag=session,
+                    effective_simulate=effective_simulate,
+                    rule_name=state["rule"],
+                    entry_side=side,
+                    entry_price_cents=entry_price_cents,
+                    price_bucket=price_bucket,
+                    calibrated_p_win=calibrated_p_win,
+                    gross_ev_cents_per_contract=round(gross_ev_cents, 4) if gross_ev_cents is not None else None,
+                    net_ev_cents_per_contract=round(net_ev_cents, 4) if net_ev_cents is not None else None,
+                    bucket_trade_count=bucket_trade_count,
+                    calibration_version=calibration.get("version", ""),
                 )
 
             # --- Execute trade ---
             if action == "trading" and side:
-                price_cents = int(entry * 100)
-                contracts = 10  # fixed 10 contracts per trade
+                price_cents = entry_price_cents
+                contracts = 10
                 bet_dollars = contracts * price_cents / 100  # actual notional
+                signal_ref = build_signal_ref(decision_mode, calibration.get("version", ""), side, price_bucket)
 
                 if effective_simulate:
                     # --- SIMULATION MODE: log but don't place ---
                     log.info(
-                        ">>> SIM TRADE: %s %s @ %dc x%d ($%.1f) | %.0f/4 agree | edge=%.0f%%",
+                        ">>> SIM TRADE: %s %s @ %dc x%d ($%.2f) | %.0f/4 agree | edge=%.0f%% | %s",
                         side.upper(), ticker, price_cents, contracts, bet_dollars,
-                        agreement, edge * 100,
+                        agreement, edge * 100, signal_ref,
                     )
                     # Write to dedicated sim trade log
                     if _sim_trade_log:
                         with open(_sim_trade_log, "a") as f:
                             f.write(f"{datetime.now(timezone.utc).isoformat()} TRADE {side.upper()} {ticker} @ {price_cents}c x{contracts} "
                                     f"edge={edge*100:.0f}% agree={agreement:.1f}/4 "
+                                    f"bucket={price_bucket or 'n/a'} pwin={calibrated_p_win:.3f} netev={net_ev_cents:+.2f}c "
                                     f"XGB={xgb_vote[0].upper()} MOM={mom_vote[0].upper()} MR={mr_vote[0].upper()} KAL={kalshi_vote[0].upper()} "
                                     f"BTC=${btc:,.0f}\n" if btc else "")
                     traded_tickers.add(ticker)
@@ -548,12 +652,14 @@ def main():
                         submitted_price_cents=price_cents,
                         submitted_count=contracts,
                         session_tag=session,
+                        signal_ref=signal_ref,
                     ))
                     ledger.save()
 
                     if journal.entries:
                         journal.entries[-1]["action"] = "simulated"
                         journal.entries[-1]["entry_price"] = price_cents
+                        journal.entries[-1]["entry_price_cents"] = price_cents
                         journal.entries[-1]["contracts"] = contracts
                         journal.entries[-1]["bet_dollars"] = bet_dollars
                         journal.save()
@@ -563,9 +669,9 @@ def main():
                 else:
                     # --- LIVE MODE: place real order ---
                     log.info(
-                        ">>> TRADE: %s %s @ %dc x%d ($%.1f) | %.0f/4 agree | edge=%.0f%%",
+                        ">>> TRADE: %s %s @ %dc x%d ($%.2f) | %.0f/4 agree | edge=%.0f%% | %s",
                         side.upper(), ticker, price_cents, contracts, bet_dollars,
-                        agreement, edge * 100,
+                        agreement, edge * 100, signal_ref,
                     )
 
                     try:
@@ -601,12 +707,14 @@ def main():
                             filled_price_cents=price_cents if status == "executed" else 0,
                             filled_count=contracts if status == "executed" else 0,
                             session_tag=session,
+                            signal_ref=signal_ref,
                         ))
                         ledger.save()
 
                         if journal.entries:
                             journal.entries[-1]["action"] = "executed" if status == "executed" else status
                             journal.entries[-1]["entry_price"] = price_cents
+                            journal.entries[-1]["entry_price_cents"] = price_cents
                             journal.entries[-1]["contracts"] = contracts
                             journal.entries[-1]["bet_dollars"] = bet_dollars
                             journal.save()

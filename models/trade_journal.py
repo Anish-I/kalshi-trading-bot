@@ -52,6 +52,17 @@ class TradeJournal:
         bet_dollars: float | None = None,
         edge: float | None = None,
         features_snapshot: dict | None = None,
+        session_tag: str | None = None,
+        effective_simulate: bool | None = None,
+        rule_name: str | None = None,
+        entry_side: str | None = None,
+        entry_price_cents: int | None = None,
+        price_bucket: str | None = None,
+        calibrated_p_win: float | None = None,
+        gross_ev_cents_per_contract: float | None = None,
+        net_ev_cents_per_contract: float | None = None,
+        bucket_trade_count: int | None = None,
+        calibration_version: str | None = None,
     ) -> None:
         """Log a trading decision (trade or no-trade)."""
         entry = {
@@ -69,6 +80,17 @@ class TradeJournal:
             "contracts": contracts,
             "bet_dollars": bet_dollars,
             "edge": edge,
+            "session_tag": session_tag,
+            "effective_simulate": effective_simulate,
+            "rule_name": rule_name,
+            "entry_side": entry_side or side,
+            "entry_price_cents": entry_price if entry_price is not None else entry_price_cents,
+            "price_bucket": price_bucket,
+            "calibrated_p_win": calibrated_p_win,
+            "gross_ev_cents_per_contract": gross_ev_cents_per_contract,
+            "net_ev_cents_per_contract": net_ev_cents_per_contract,
+            "bucket_trade_count": bucket_trade_count,
+            "calibration_version": calibration_version,
         }
 
         # Per-model votes
@@ -79,9 +101,23 @@ class TradeJournal:
 
         # Key features for analysis
         if features_snapshot:
-            for feat in ["rsi_14", "momentum_5m", "momentum_10m", "donchian_position",
-                         "ema_9_slope", "vwap_deviation", "volume_sma_ratio", "stoch_k"]:
-                entry[f"feat_{feat}"] = features_snapshot.get(feat)
+            feature_aliases = {
+                "rsi_14": ["rsi_14"],
+                "ret_5m": ["ret_5m", "momentum_5m"],
+                "ret_10m": ["ret_10m", "momentum_10m"],
+                "donchian_position": ["donchian_position"],
+                "ema_9_slope": ["ema_9_slope"],
+                "vwap_deviation": ["vwap_deviation"],
+                "volume_sma_ratio": ["volume_sma_ratio"],
+                "stoch_k": ["stoch_k"],
+            }
+            for feat_name, aliases in feature_aliases.items():
+                value = None
+                for alias in aliases:
+                    if alias in features_snapshot:
+                        value = features_snapshot.get(alias)
+                        break
+                entry[f"feat_{feat_name}"] = value
 
         self.entries.append(entry)
 
