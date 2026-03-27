@@ -27,11 +27,23 @@ LOCK_DIR = Path("D:/kalshi-data/locks")
 
 def _is_pid_alive(pid: int) -> bool:
     """Check if a process with the given PID is still running."""
-    try:
-        os.kill(pid, 0)  # signal 0 = check existence, don't kill
-        return True
-    except (OSError, ProcessLookupError):
-        return False
+    if sys.platform == "win32":
+        # Windows: use tasklist to check if PID exists
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return str(pid) in result.stdout
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
 
 
 class ProcessLock:

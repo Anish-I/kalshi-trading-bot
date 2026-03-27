@@ -292,6 +292,14 @@ def main():
     _journal = journal
 
     c = KalshiClient()
+
+    # SAFETY: In simulate mode, block place_order at the client level
+    if SIMULATE:
+        def _blocked_place_order(*args, **kwargs):
+            raise RuntimeError("BLOCKED: place_order called in SIMULATE mode")
+        c.place_order = _blocked_place_order
+        log.info("SAFETY: place_order BLOCKED in simulation mode")
+
     tracker = KXBTCMarketTracker(c)
     log.info("Balance: $%.2f", c.get_balance())
     log.info("Journal: %d entries, weights=%s",
