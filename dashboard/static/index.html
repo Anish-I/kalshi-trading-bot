@@ -412,30 +412,60 @@ async function refresh() {
       }
 
       if(wr.opportunities!==undefined) {
-        const be=wr.best_edge||0;
-        const ec=be>=25?'var(--green)':be>=15?'var(--yellow)':'var(--text-dim)';
-        let topHtml='';
-        if(wr.top_5&&wr.top_5.length) {
-          topHtml='<table style="margin-top:8px"><thead><tr><th>City</th><th>Strike</th><th>Model</th><th>Mkt</th><th>Edge</th><th>Side</th></tr></thead><tbody>'+
-            wr.top_5.map(o=>{
-              const c=o.edge>=25?'var(--green)':o.edge>=15?'var(--yellow)':'var(--text-dim)';
-              return `<tr><td>${o.city}</td><td>${o.strike}</td><td>${o.model}%</td><td>${o.market}%</td><td style="color:${c}">${o.edge}%</td><td>${o.side}</td></tr>`;
-            }).join('')+'</tbody></table>';
+        // Filter out near-settlement noise (market > 95% or < 5%)
+        const realOpps = (wr.top_5||[]).filter(o => o.market > 5 && o.market < 95);
+        const realCount = realOpps.length;
+
+        // Status cards
+        const posColor = (wr.open_positions||0) > 0 ? 'var(--accent)' : 'var(--text-dim)';
+        const pnlVal = (wr.daily_pnl_cents||0)/100;
+        const riskDot = wr.can_trade ? 'on' : 'off';
+
+        let topHtml = '';
+        if (realOpps.length > 0) {
+          topHtml = '<div style="margin-top:8px;font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Tradeable Opportunities</div>' +
+            '<table><thead><tr><th>City</th><th>Forecast</th><th>Our %</th><th>Mkt %</th><th>Edge</th><th>Bet</th></tr></thead><tbody>' +
+            realOpps.map(o => {
+              const ec = o.edge >= 25 ? 'var(--green)' : o.edge >= 15 ? 'var(--yellow)' : 'var(--text-dim)';
+              return `<tr>
+                <td style="color:var(--text-bright)">${o.city}</td>
+                <td>${o.strike}</td>
+                <td>${o.model}%</td>
+                <td>${o.market}%</td>
+                <td style="color:${ec};font-weight:500">${o.edge}%</td>
+                <td>${o.side}</td>
+              </tr>`;
+            }).join('') + '</tbody></table>';
+        } else {
+          topHtml = '<div style="margin-top:8px;color:var(--text-dim);font-size:11px">No new tradeable opportunities (positions already held or markets settled)</div>';
         }
-        document.getElementById('weather-thinking').innerHTML=`
-          <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">
-            <div class="opp-count">${wr.opportunities}</div>
-            <div style="color:var(--text-dim);font-size:11px">opportunities</div>
-            <div class="edge-badge" style="background:${ec};color:var(--bg)">best ${be}%</div>
+
+        document.getElementById('weather-thinking').innerHTML = `
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">
+            <div style="background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:8px;text-align:center">
+              <div style="color:var(--text-dim);font-size:9px;text-transform:uppercase">Positions</div>
+              <div style="font-size:20px;font-weight:700;color:${posColor}">${wr.open_positions||0}</div>
+            </div>
+            <div style="background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:8px;text-align:center">
+              <div style="color:var(--text-dim);font-size:9px;text-transform:uppercase">Today</div>
+              <div style="font-size:20px;font-weight:700;color:var(--text)">${wr.trades_today||0} trades</div>
+            </div>
+            <div style="background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:8px;text-align:center">
+              <div style="color:var(--text-dim);font-size:9px;text-transform:uppercase">P&L</div>
+              <div style="font-size:20px;font-weight:700" class="${pnlVal>=0?'win':'loss'}">$${pnlVal.toFixed(2)}</div>
+            </div>
+            <div style="background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:8px;text-align:center">
+              <div style="color:var(--text-dim);font-size:9px;text-transform:uppercase">Risk</div>
+              <div style="font-size:14px;margin-top:4px"><span class="dot ${riskDot}" style="width:8px;height:8px"></span> ${wr.can_trade?'OK':wr.risk_status}</div>
+            </div>
           </div>
-          <div class="data-grid">
-            <div class="label">Positions</div><div class="value">${wr.open_positions||0}</div>
-            <div class="label">Trades</div><div class="value">${wr.trades_today||0}</div>
-            <div class="label">P&L</div><div class="value ${(wr.daily_pnl_cents||0)>=0?'win':'loss'}">$${((wr.daily_pnl_cents||0)/100).toFixed(2)}</div>
-            <div class="label">Risk</div><div class="value">${wr.can_trade?'<span style="color:var(--green)">OK</span>':'<span style="color:var(--red)">'+wr.risk_status+'</span>'}</div>
+          <div style="color:var(--text-dim);font-size:11px;margin-bottom:6px">
+            Scanned <span style="color:var(--text-bright)">${wr.opportunities}</span> markets across 27 cities |
+            Balance: <span style="color:var(--accent)">$${(wr.balance||0).toFixed(2)}</span> |
+            Settles overnight
           </div>
           ${topHtml}
-          <div style="color:var(--text-dim);font-size:9px;margin-top:6px">${fmtTime(wr.time)}</div>`;
+          <div style="color:var(--text-dim);font-size:9px;margin-top:6px">Last scan: ${fmtTime(wr.time)}</div>`;
       }
       // Paper trades — always visible
       const papers = logsRes.paper_trades || [];
