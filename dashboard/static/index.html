@@ -192,8 +192,17 @@ tr:hover { background:rgba(0,229,255,0.03); }
     </table>
   </div>
 
-  <!-- TRADES -->
-  <div class="panel grid-full">
+  <!-- PAPER TRADES -->
+  <div class="panel" id="paper-panel" style="display:none">
+    <div class="panel-title">Paper Trades (Simulation) <span class="tag" style="background:var(--purple);color:var(--bg)">SIM</span></div>
+    <table>
+      <thead><tr><th>Ticker</th><th>Side</th><th>Entry</th><th>Result</th><th>P&L</th><th>Time</th></tr></thead>
+      <tbody id="paper-body"><tr><td colspan="6" style="color:var(--text-dim)">No paper trades yet</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- REAL TRADES -->
+  <div class="panel">
     <div class="panel-title">Recent Settlements</div>
     <table>
       <thead><tr><th>Ticker</th><th>Side</th><th>Ct</th><th>Result</th><th>P&L</th><th>Time</th></tr></thead>
@@ -378,6 +387,50 @@ async function refresh() {
           ${topHtml}
           <div style="color:var(--text-dim);font-size:9px;margin-top:6px">${fmtTime(wr.time)}</div>`;
       }
+      // Paper trades
+      const paperPanel = document.getElementById('paper-panel');
+      const papers = logsRes.paper_trades || [];
+      const isSim2 = cr.simulate === true;
+
+      if (isSim2 || papers.length > 0) {
+        paperPanel.style.display = '';
+        const settled = papers.filter(p => p.settled);
+        const pending = papers.filter(p => !p.settled);
+        const simWins = settled.filter(p => p.won).length;
+        const simPnl = settled.reduce((s, p) => s + (p.pnl_cents || 0), 0);
+
+        let paperHtml = '';
+        if (papers.length > 0) {
+          paperHtml = papers.map(p => {
+            const won = p.won;
+            const resultText = p.settled ? (won ? 'WIN' : 'LOSS') : 'pending';
+            const resultClass = p.settled ? (won ? 'win' : 'loss') : '';
+            return `<tr>
+              <td>${p.ticker}</td>
+              <td>${(p.side||'').toUpperCase()}</td>
+              <td>${p.entry_price}c</td>
+              <td class="${resultClass}">${resultText}</td>
+              <td class="${p.pnl_cents >= 0 ? 'win' : 'loss'}">${p.settled ? fmt(p.pnl_cents) : '—'}</td>
+              <td style="color:var(--text-dim)">${fmtTime(p.time)}</td>
+            </tr>`;
+          }).join('');
+
+          if (settled.length > 0) {
+            paperHtml += `<tr style="border-top:1px solid var(--border-hi)">
+              <td colspan="3" style="color:var(--purple)">Paper Total</td>
+              <td style="color:var(--purple)">${simWins}W/${settled.length - simWins}L</td>
+              <td class="${simPnl >= 0 ? 'win' : 'loss'}">${fmt(simPnl)}</td>
+              <td></td>
+            </tr>`;
+          }
+        } else {
+          paperHtml = '<tr><td colspan="6" style="color:var(--text-dim)">Simulation running — no trades yet</td></tr>';
+        }
+        document.getElementById('paper-body').innerHTML = paperHtml;
+      } else {
+        paperPanel.style.display = 'none';
+      }
+
     } catch(e){}
 
     document.getElementById('last-updated').textContent=`${new Date().toLocaleTimeString()} · auto-refresh 10s`;

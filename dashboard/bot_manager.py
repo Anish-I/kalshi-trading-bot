@@ -18,12 +18,20 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 BOT_CONFIGS = {
-    "crypto_ml_trader": {
+    "crypto_live": {
         "script": "scripts/crypto_ml_trader.py",
-        "label": "Crypto ML Trader",
-        "log": "crypto_ml_trader_bg.log",
+        "label": "Crypto LIVE",
+        "log": "crypto_live_bg.log",
+        "controllable": True,
+        "mutual_exclude": "crypto_sim",
+    },
+    "crypto_sim": {
+        "script": "scripts/crypto_ml_trader.py",
+        "label": "Crypto SIM",
+        "log": "crypto_sim_bg.log",
         "controllable": True,
         "extra_args": ["--simulate"],
+        "mutual_exclude": "crypto_live",
     },
     "weather_trade": {
         "script": "scripts/weather_trade.py",
@@ -46,8 +54,10 @@ class BotManager:
         self._start_times: dict[str, float] = {}
 
     def _get_lock_pid(self, name: str) -> int | None:
-        """Read PID from lock file."""
-        lock_file = LOCK_DIR / f"{name}.pid"
+        """Read PID from lock file. Both crypto_live and crypto_sim share crypto_ml_trader.pid."""
+        # The actual script uses "crypto_ml_trader" as lock name regardless of sim/live
+        lock_name = "crypto_ml_trader" if name.startswith("crypto_") else name
+        lock_file = LOCK_DIR / f"{lock_name}.pid"
         if not lock_file.exists():
             return None
         try:
@@ -80,6 +90,13 @@ class BotManager:
         running, pid = self._is_running(name)
         if running:
             return {"ok": False, "error": f"{name} already running (PID {pid})"}
+
+        # Mutual exclusion: can't run live and sim at the same time
+        exclude = cfg.get("mutual_exclude")
+        if exclude:
+            ex_running, ex_pid = self._is_running(exclude)
+            if ex_running:
+                return {"ok": False, "error": f"Stop {exclude} first (PID {ex_pid})"}
 
         script = str(PROJECT_ROOT / cfg["script"])
         log_path = str(PROJECT_ROOT / cfg["log"])

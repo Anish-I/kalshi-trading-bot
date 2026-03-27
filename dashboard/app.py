@@ -177,4 +177,25 @@ def get_logs():
     except Exception:
         pass
 
-    return {"crypto": crypto_state, "weather": weather_state, "notification": notification}
+    # Paper trade journal
+    paper_trades = []
+    try:
+        journal_path = DATA_DIR / "trade_journal.parquet"
+        if journal_path.exists():
+            import pandas as pd
+            df = pd.read_parquet(journal_path)
+            sim_trades = df[df["action"] == "simulated"].tail(20)
+            for _, row in sim_trades.iterrows():
+                paper_trades.append({
+                    "ticker": row.get("ticker", ""),
+                    "side": row.get("side", ""),
+                    "entry_price": int(row.get("entry_price", 0) or 0),
+                    "won": row.get("won"),
+                    "pnl_cents": int(row.get("pnl_cents", 0) or 0),
+                    "settled": bool(row.get("settled", False)),
+                    "time": str(row.get("time", "")),
+                })
+    except Exception:
+        pass
+
+    return {"crypto": crypto_state, "weather": weather_state, "notification": notification, "paper_trades": paper_trades}
