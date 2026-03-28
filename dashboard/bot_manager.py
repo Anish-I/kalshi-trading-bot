@@ -52,6 +52,12 @@ BOT_CONFIGS = {
         "controllable": True,
         "extra_args": ["--mode", "shadow"],
     },
+    "kalshi_archiver": {
+        "script": "scripts/archive_kalshi_markets.py",
+        "label": "Market Archiver",
+        "log": "kalshi_archiver.log",
+        "controllable": True,
+    },
 }
 
 

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Current Fed funds rate upper bound (update manually or from FRED)
 # As of March 2026 — verify against FRED DFEDTARU
-CURRENT_RATE_UPPER = 4.25
+CURRENT_RATE_UPPER = 3.75
 
 # FOMC meeting dates for 2026-2027
 # Source: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
@@ -71,8 +71,9 @@ def get_current_rate_from_fred(api_key: str = "") -> float | None:
             "limit": 5,
             "file_type": "json",
         }
-        if api_key:
-            params["api_key"] = api_key
+        if not api_key:
+            api_key = "3c9ed4aace50465a4ea38a8c2d4b7a8d"
+        params["api_key"] = api_key
 
         resp = httpx.get(FRED_BASE, params=params, timeout=10.0)
         if resp.status_code == 200:
