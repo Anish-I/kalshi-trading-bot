@@ -47,7 +47,7 @@ WEATHER_SERIES_PREFIXES = [
 
 # Intervals
 CRYPTO_INTERVAL_S = 30
-WEATHER_INTERVAL_S = 900  # 15 min
+WEATHER_INTERVAL_S = 300  # 5 min (denser for production weather strategy)
 ORDERBOOK_DEPTH = 5
 
 

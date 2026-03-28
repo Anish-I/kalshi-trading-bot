@@ -191,6 +191,102 @@ def get_weather_calibration():
     return calibration_summary()
 
 
+@app.get("/api/weather/breakdown")
+def get_weather_breakdown():
+    """Per-city weather trading breakdown from order ledger + positions."""
+    import math
+    _ledger = OrderLedger(str(DATA_DIR))
+    weather_recs = [r for r in _ledger._records if r.get("strategy") == "weather" and r.get("status") == "settled"]
+
+    # Group by city (extract from ticker: KXHIGHNY → NYC, KXHIGHTPHX → PHX)
+    city_stats = {}
+    for r in weather_recs:
+        ticker = r.get("ticker", "")
+        # Extract city code from ticker
+        city = ticker.replace("KXHIGH", "").replace("KXLOW", "").replace("T", "").replace("-", " ").split()[0] if ticker else "?"
+        if city not in city_stats:
+            city_stats[city] = {"trades": 0, "wins": 0, "pnl": 0}
+        city_stats[city]["trades"] += 1
+        pnl = r.get("pnl_cents", 0)
+        if isinstance(pnl, float) and math.isnan(pnl):
+            pnl = 0
+        city_stats[city]["pnl"] += int(pnl)
+        if int(pnl) > 0:
+            city_stats[city]["wins"] += 1
+
+    # Sort by P&L
+    breakdown = []
+    for city, stats in sorted(city_stats.items(), key=lambda x: x[1]["pnl"], reverse=True):
+        breakdown.append({
+            "city": city,
+            "trades": stats["trades"],
+            "wins": stats["wins"],
+            "losses": stats["trades"] - stats["wins"],
+            "win_rate": round(stats["wins"] / stats["trades"] * 100) if stats["trades"] else 0,
+            "pnl_cents": stats["pnl"],
+        })
+
+    total_trades = sum(s["trades"] for s in city_stats.values())
+    total_pnl = sum(s["pnl"] for s in city_stats.values())
+    total_wins = sum(s["wins"] for s in city_stats.values())
+
+    return {
+        "breakdown": breakdown,
+        "summary": {
+            "total_trades": total_trades,
+            "total_wins": total_wins,
+            "total_pnl_cents": total_pnl,
+            "win_rate": round(total_wins / total_trades * 100) if total_trades else 0,
+        },
+    }
+
+
+@app.get("/api/crypto/stats")
+def get_crypto_stats():
+    """Conjunction vs single-model stats from trade journal."""
+    import math
+    import pandas as pd
+
+    stats = {"conjunction": {"trades": 0, "wins": 0, "pnl": 0},
+             "exploration": {"trades": 0, "wins": 0, "pnl": 0}}
+
+    try:
+        journal_path = DATA_DIR / "trade_journal.parquet"
+        if journal_path.exists():
+            df = pd.read_parquet(journal_path)
+            sim = df[df["action"] == "simulated"]
+            for _, row in sim.iterrows():
+                rule = str(row.get("rule_name", ""))
+                settled = row.get("settled", False)
+                if not settled:
+                    continue
+                won = row.get("won", False)
+                pnl = row.get("pnl_cents", 0)
+                if isinstance(pnl, float) and math.isnan(pnl):
+                    pnl = 0
+                pnl = int(pnl)
+
+                if "single_model" in rule or "exploration" in rule:
+                    key = "exploration"
+                else:
+                    key = "conjunction"
+
+                stats[key]["trades"] += 1
+                stats[key]["pnl"] += pnl
+                if won:
+                    stats[key]["wins"] += 1
+    except Exception:
+        pass
+
+    for key in stats:
+        s = stats[key]
+        s["losses"] = s["trades"] - s["wins"]
+        s["win_rate"] = round(s["wins"] / s["trades"] * 100) if s["trades"] else 0
+        s["avg_pnl"] = round(s["pnl"] / s["trades"], 1) if s["trades"] else 0
+
+    return stats
+
+
 @app.get("/api/logs")
 def get_logs():
     """Return live state from both traders."""
