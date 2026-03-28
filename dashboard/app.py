@@ -228,14 +228,19 @@ def get_logs():
             df = pd.read_parquet(journal_path)
             sim_trades = df[df["action"] == "simulated"].tail(20)
             for _, row in sim_trades.iterrows():
+                import math
+                pnl = row.get("pnl_cents", 0)
+                won = row.get("won")
+                ep = row.get("entry_price", 0)
                 paper_trades.append({
                     "ticker": row.get("ticker", ""),
                     "side": row.get("side", ""),
-                    "entry_price": int(row.get("entry_price", 0) or 0),
-                    "won": row.get("won"),
-                    "pnl_cents": int(row.get("pnl_cents", 0) or 0),
+                    "entry_price": int(ep) if ep is not None and not (isinstance(ep, float) and math.isnan(ep)) else 0,
+                    "won": bool(won) if won is not None and not (isinstance(won, float) and math.isnan(won)) else None,
+                    "pnl_cents": int(pnl) if pnl is not None and not (isinstance(pnl, float) and math.isnan(pnl)) else 0,
                     "settled": bool(row.get("settled", False)),
                     "time": str(row.get("time", "")),
+                    "signal_ref": str(row.get("rule_name", "")),
                 })
     except Exception:
         pass

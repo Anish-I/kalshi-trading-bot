@@ -303,6 +303,14 @@ async function refresh() {
     const botsHtml=Object.entries(statusRes.bots).map(([name,b])=>{
       const ctrl=b.controllable!==false;
       const st=b.running?`PID ${b.pid}${b.uptime_s?' · '+fmtUptime(b.uptime_s):''}`:'offline';
+
+      // Mode badge
+      let modeBadge = '';
+      if (name.includes('sim') || name.includes('_sim')) modeBadge = '<span class="tag tag-sim" style="margin-left:4px">SIM</span>';
+      else if (name.includes('shadow')) modeBadge = '<span class="tag" style="margin-left:4px;background:var(--orange);color:var(--bg)">SHADOW</span>';
+      else if (name.includes('paper')) modeBadge = '<span class="tag tag-sim" style="margin-left:4px">PAPER</span>';
+      else if (name.includes('live') && !name.includes('collect')) modeBadge = '<span class="tag tag-live" style="margin-left:4px">LIVE</span>';
+
       let btns='';
       if(ctrl){
         btns=b.running
@@ -311,7 +319,7 @@ async function refresh() {
       } else {
         btns=`<span style="color:var(--text-dim);font-size:10px">always-on</span>`;
       }
-      return `<div class="bot-row"><div class="bot-info"><span class="dot ${b.running?'on':'off'}"></span><span class="bot-name">${b.label}</span><span class="bot-meta">${st}</span></div><div style="display:flex;gap:4px">${btns}</div></div>`;
+      return `<div class="bot-row"><div class="bot-info"><span class="dot ${b.running?'on':'off'}"></span><span class="bot-name">${b.label}</span>${modeBadge}<span class="bot-meta">${st}</span></div><div style="display:flex;gap:4px">${btns}</div></div>`;
     }).join('');
     const ch = statusRes.collector_health || {};
     const chAge = ch.age_seconds != null ? `${ch.age_seconds}s ago` : 'unknown';

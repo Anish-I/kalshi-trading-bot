@@ -45,12 +45,35 @@ BOT_CONFIGS = {
         "log": "collect_data_bg.log",
         "controllable": False,
     },
-    "fed_trader": {
+    "fed_shadow": {
         "script": "scripts/run_fed_trader.py",
-        "label": "Fed Rate Trader",
+        "label": "Fed SHADOW",
         "log": "fed_trader_shadow.log",
         "controllable": True,
         "extra_args": ["--mode", "shadow"],
+        "mutual_exclude": "fed_paper,fed_live",
+        "lock_name": "fed_trader",
+        "mode": "shadow",
+    },
+    "fed_paper": {
+        "script": "scripts/run_fed_trader.py",
+        "label": "Fed PAPER",
+        "log": "fed_trader_paper.log",
+        "controllable": True,
+        "extra_args": ["--mode", "paper"],
+        "mutual_exclude": "fed_shadow,fed_live",
+        "lock_name": "fed_trader",
+        "mode": "paper",
+    },
+    "fed_live": {
+        "script": "scripts/run_fed_trader.py",
+        "label": "Fed LIVE",
+        "log": "fed_trader_live.log",
+        "controllable": True,
+        "extra_args": ["--mode", "live"],
+        "mutual_exclude": "fed_shadow,fed_paper",
+        "lock_name": "fed_trader",
+        "mode": "live",
     },
     "kalshi_archiver": {
         "script": "scripts/archive_kalshi_markets.py",
@@ -67,8 +90,10 @@ class BotManager:
         self._start_times: dict[str, float] = {}
 
     def _get_lock_pid(self, name: str) -> int | None:
-        """Read PID from lock file. crypto_live and crypto_sim have separate locks."""
-        lock_file = LOCK_DIR / f"{name}.pid"
+        """Read PID from lock file. Some bots share lock names (fed modes)."""
+        # Map bot config name to actual lock file name
+        lock_name = BOT_CONFIGS.get(name, {}).get("lock_name", name)
+        lock_file = LOCK_DIR / f"{lock_name}.pid"
         if not lock_file.exists():
             return None
         try:
@@ -102,12 +127,15 @@ class BotManager:
         if running:
             return {"ok": False, "error": f"{name} already running (PID {pid})"}
 
-        # Mutual exclusion: can't run live and sim at the same time
-        exclude = cfg.get("mutual_exclude")
+        # Mutual exclusion: can't run conflicting modes at the same time
+        exclude = cfg.get("mutual_exclude", "")
         if exclude:
-            ex_running, ex_pid = self._is_running(exclude)
-            if ex_running:
-                return {"ok": False, "error": f"Stop {exclude} first (PID {ex_pid})"}
+            for ex_name in exclude.split(","):
+                ex_name = ex_name.strip()
+                if ex_name:
+                    ex_running, ex_pid = self._is_running(ex_name)
+                    if ex_running:
+                        return {"ok": False, "error": f"Stop {ex_name} first (PID {ex_pid})"}
 
         script = str(PROJECT_ROOT / cfg["script"])
         log_path = str(PROJECT_ROOT / cfg["log"])
@@ -192,5 +220,6 @@ class BotManager:
                 "uptime_s": uptime,
                 "log_file": cfg["log"],
                 "controllable": cfg.get("controllable", True),
+                "mode": cfg.get("mode", ""),
             }
         return result
