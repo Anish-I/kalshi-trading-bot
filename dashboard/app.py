@@ -161,11 +161,12 @@ def restart_bot(name: str):
 @app.get("/api/execution")
 def get_execution():
     """Execution quality metrics from order ledger."""
+    _ledger = OrderLedger(str(DATA_DIR))
     return {
-        "all": ledger.get_execution_stats(),
-        "crypto": ledger.get_execution_stats("crypto"),
-        "crypto_sim": ledger.get_execution_stats("crypto_sim"),
-        "weather": ledger.get_execution_stats("weather"),
+        "all": _ledger.get_execution_stats(),
+        "crypto": _ledger.get_execution_stats("crypto"),
+        "crypto_sim": _ledger.get_execution_stats("crypto_sim"),
+        "weather": _ledger.get_execution_stats("weather"),
     }
 
 

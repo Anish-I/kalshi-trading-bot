@@ -209,6 +209,24 @@ tr:hover { background:rgba(0,229,255,0.03); }
       <tbody id="trades-body"><tr><td colspan="6" style="color:var(--text-dim)">Loading...</td></tr></tbody>
     </table>
   </div>
+
+  <!-- ALERTS FEED -->
+  <div class="panel">
+    <div class="panel-title">Alert Feed <span class="tag" style="background:var(--orange);color:var(--bg)">LIVE</span></div>
+    <div id="alerts-feed" style="max-height:200px;overflow-y:auto;font-size:11px">Loading alerts...</div>
+  </div>
+
+  <!-- EXECUTION METRICS -->
+  <div class="panel">
+    <div class="panel-title">Execution Quality</div>
+    <div id="exec-metrics">Loading...</div>
+  </div>
+
+  <!-- ARCHIVE STATUS -->
+  <div class="panel">
+    <div class="panel-title">Data Archive & Calibration</div>
+    <div id="archive-status">Loading...</div>
+  </div>
 </div>
 
 <div class="footer">
@@ -260,7 +278,14 @@ async function botAction(name,action) {
 
 async function refresh() {
   try {
-    const [statusRes,tradesRes]=await Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/trades').then(r=>r.json())]);
+    const [statusRes,tradesRes,alertsRes,execRes,archiveRes,weatherCalRes]=await Promise.all([
+      fetch('/api/status').then(r=>r.json()),
+      fetch('/api/trades').then(r=>r.json()),
+      fetch('/api/alerts').then(r=>r.json()).catch(()=>({alerts:[]})),
+      fetch('/api/execution').then(r=>r.json()).catch(()=>({})),
+      fetch('/api/archive/status').then(r=>r.json()).catch(()=>({exists:false})),
+      fetch('/api/calibration/weather').then(r=>r.json()).catch(()=>({loaded:false})),
+    ]);
 
     document.getElementById('balance').textContent=`$${statusRes.balance.toFixed(2)}`;
 
@@ -504,6 +529,92 @@ async function refresh() {
         paperHtml = '<tr><td colspan="6" style="color:var(--text-dim)">Start Crypto SIM to paper trade</td></tr>';
       }
       document.getElementById('paper-body').innerHTML = paperHtml;
+
+      // --- ALERTS FEED ---
+      const alerts = alertsRes.alerts || [];
+      if (alerts.length > 0) {
+        const alertHtml = alerts.slice().reverse().map(a => {
+          let clr = 'var(--text-dim)';
+          if (a.includes('[CRITICAL]')) clr = 'var(--red)';
+          else if (a.includes('[WARNING]')) clr = 'var(--orange)';
+          else if (a.includes('[INFO]')) clr = 'var(--text)';
+          const parts = a.match(/\[(.*?)\]\s*\[(.*?)\]\s*\[(.*?)\]\s*(.*)/);
+          if (parts) {
+            return `<div style="padding:2px 0;border-bottom:1px solid var(--border);color:${clr}">
+              <span style="color:var(--text-dim);font-size:9px">${parts[1].substring(11,16)}</span>
+              <span style="font-size:9px;padding:0 3px;background:${clr};color:var(--bg);border-radius:1px;margin:0 4px">${parts[3]}</span>
+              ${parts[4]}
+            </div>`;
+          }
+          return `<div style="padding:2px 0;color:${clr}">${a}</div>`;
+        }).join('');
+        document.getElementById('alerts-feed').innerHTML = alertHtml;
+      } else {
+        document.getElementById('alerts-feed').innerHTML = '<div style="color:var(--text-dim)">No alerts yet</div>';
+      }
+
+      // --- EXECUTION METRICS ---
+      const ex = execRes.all || {};
+      const exSim = execRes.crypto_sim || {};
+      if (ex.total_orders > 0) {
+        document.getElementById('exec-metrics').innerHTML = `
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px">
+            <div style="background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:8px;text-align:center">
+              <div style="color:var(--text-dim);font-size:9px;text-transform:uppercase">Fill Rate</div>
+              <div style="font-size:18px;font-weight:700;color:var(--green)">${(ex.fill_ratio*100).toFixed(0)}%</div>
+            </div>
+            <div style="background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:8px;text-align:center">
+              <div style="color:var(--text-dim);font-size:9px;text-transform:uppercase">Total Orders</div>
+              <div style="font-size:18px;font-weight:700;color:var(--text)">${ex.total_orders}</div>
+            </div>
+            <div style="background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:8px;text-align:center">
+              <div style="color:var(--text-dim);font-size:9px;text-transform:uppercase">Avg Slippage</div>
+              <div style="font-size:18px;font-weight:700;color:${ex.slippage_mean>2?'var(--red)':'var(--text)'}">${ex.slippage_mean.toFixed(1)}c</div>
+            </div>
+          </div>
+          <div class="data-grid" style="font-size:11px">
+            <div class="label">Filled</div><div class="value">${ex.filled_count}</div>
+            <div class="label">Cancelled</div><div class="value">${ex.cancelled_count}</div>
+            <div class="label">Expired</div><div class="value">${ex.expired_count}</div>
+            <div class="label">Worst Slip</div><div class="value">${ex.slippage_worst}c</div>
+            <div class="label">Sim Orders</div><div class="value">${exSim.total_orders||0}</div>
+            <div class="label">Sim Fill%</div><div class="value">${exSim.fill_ratio ? (exSim.fill_ratio*100).toFixed(0)+'%' : '—'}</div>
+          </div>`;
+      } else {
+        document.getElementById('exec-metrics').innerHTML = '<div style="color:var(--text-dim)">No orders recorded yet</div>';
+      }
+
+      // --- ARCHIVE & CALIBRATION STATUS ---
+      let archHtml = '';
+      if (archiveRes.exists) {
+        const age = archiveRes.latest_file_age_s;
+        const ageStr = age != null ? (age < 60 ? `${age}s ago` : `${Math.floor(age/60)}m ago`) : '—';
+        const archDot = age != null && age < 120 ? 'on' : 'off';
+        archHtml = `
+          <div style="margin-bottom:8px">
+            <span class="dot ${archDot}" style="width:6px;height:6px"></span>
+            <span style="color:var(--text-bright);font-weight:500">Archive</span>
+            <span style="color:var(--text-dim);margin-left:8px">${archiveRes.days} days | ${archiveRes.total_files} files | latest: ${ageStr} (${archiveRes.latest_records} records)</span>
+          </div>`;
+      } else {
+        archHtml = '<div style="color:var(--orange);margin-bottom:8px">Archive not running</div>';
+      }
+
+      if (weatherCalRes.loaded) {
+        archHtml += `
+          <div>
+            <span class="dot on" style="width:6px;height:6px"></span>
+            <span style="color:var(--text-bright);font-weight:500">Weather Cal</span>
+            <span style="color:var(--text-dim);margin-left:8px">
+              ${weatherCalRes.matched_markets}/${weatherCalRes.total_markets} matched |
+              ${weatherCalRes.n_sufficient}/${weatherCalRes.n_buckets} buckets sufficient |
+              global win ${(weatherCalRes.global_win_rate*100).toFixed(0)}%
+            </span>
+          </div>`;
+      } else {
+        archHtml += '<div style="color:var(--text-dim)"><span class="dot off" style="width:6px;height:6px"></span> Weather calibration: not yet built (needs settled market data)</div>';
+      }
+      document.getElementById('archive-status').innerHTML = archHtml;
 
     } catch(e){}
 
