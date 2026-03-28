@@ -45,6 +45,13 @@ BOT_CONFIGS = {
         "log": "collect_data_bg.log",
         "controllable": False,
     },
+    "fed_trader": {
+        "script": "scripts/run_fed_trader.py",
+        "label": "Fed Rate Trader",
+        "log": "fed_trader_shadow.log",
+        "controllable": True,
+        "extra_args": ["--mode", "shadow"],
+    },
 }
 
 
