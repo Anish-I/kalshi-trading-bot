@@ -81,7 +81,7 @@ if SIMULATE:
     SCAN_INTERVAL = 30
     DAILY_LOSS_LIMIT_CENTS = 99999  # no limit in sim
     MIN_BALANCE_FLOOR = 0.0  # no floor in sim
-    SIM_MIN_AGREEMENT = 1.0  # lower: single-model signals fire for data generation
+    SIM_MIN_AGREEMENT = 1  # lower: single-model signals fire for data generation
     SIM_MIN_EDGE = 0.01  # 1% edge minimum (vs 3% live)
 else:
     MAX_CONTRACTS = 30

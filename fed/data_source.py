@@ -7,6 +7,7 @@ Fallback: Hardcoded FOMC calendar + current rate.
 
 import json
 import logging
+import os
 from datetime import datetime, timezone, date
 from pathlib import Path
 
@@ -72,7 +73,7 @@ def get_current_rate_from_fred(api_key: str = "") -> float | None:
             "file_type": "json",
         }
         if not api_key:
-            api_key = "3c9ed4aace50465a4ea38a8c2d4b7a8d"
+            api_key = os.environ.get("FRED_API_KEY", "3c9ed4aace50465a4ea38a8c2d4b7a8d")
         params["api_key"] = api_key
 
         resp = httpx.get(FRED_BASE, params=params, timeout=10.0)
