@@ -54,6 +54,7 @@ from engine.crypto_decision import (
     price_bucket_label,
 )
 from engine.session_tags import get_session_tag, is_live_session
+from engine.alerts import alert_trade_placed, alert_settlement, alert_risk_halt
 
 _log_file = "crypto_sim.log" if _pre_parsed.simulate else "crypto_live.log"
 logging.basicConfig(
@@ -80,7 +81,7 @@ if SIMULATE:
     SCAN_INTERVAL = 30
     DAILY_LOSS_LIMIT_CENTS = 99999  # no limit in sim
     MIN_BALANCE_FLOOR = 0.0  # no floor in sim
-    SIM_MIN_AGREEMENT = 1.5  # lower agreement threshold for sim
+    SIM_MIN_AGREEMENT = 1.0  # lower: single-model signals fire for data generation
     SIM_MIN_EDGE = 0.01  # 1% edge minimum (vs 3% live)
 else:
     MAX_CONTRACTS = 30
@@ -250,6 +251,7 @@ def check_settlements(c, ledger=None):
 
                 log.info("SIM SETTLED [%s] %s %s @ %dc pnl=%+dc total=%+dc",
                          "WIN" if won else "LOSS", ticker, sim_side.upper(), sim_price, pnl, daily_pnl)
+                alert_settlement(ticker, "WIN" if won else "LOSS", pnl, strategy="crypto_sim")
 
                 if ledger:
                     ledger.settle(ticker, result_val, pnl)
@@ -431,10 +433,17 @@ def main():
             # --- XGB + Momentum conjunction (only tradeable signal) ---
             # MR and Kalshi kept for dashboard display only, not alpha
             legacy_probability = 0.485
+            signal_rule = "xgb_mom_conjunction"
             if xgb_vote == mom_vote and xgb_vote != "flat":
                 direction = xgb_vote
                 confidence = legacy_probability
                 agreement = 2
+            elif SIMULATE and xgb_vote != "flat":
+                # Single-model exploration: XGB only, for data generation
+                direction = xgb_vote
+                confidence = xgb_conf / 100.0
+                agreement = 1
+                signal_rule = "single_model_exploration"
             else:
                 direction = "flat"
                 confidence = 0.50
@@ -464,18 +473,21 @@ def main():
             is_live = is_live_session(session, settings.CRYPTO_LIVE_SESSIONS)
             effective_simulate = SIMULATE or not is_live
             decision_mode = configured_decision_mode if effective_simulate else "legacy_conjunction"
+            # Single-model exploration trades bypass calibration (no bucket data)
+            if signal_rule == "single_model_exploration":
+                decision_mode = "legacy_conjunction"
 
             if not collector["healthy"]:
                 action = "collector_stale"
             elif ticker in traded_tickers:
                 action = "already_traded"
-            elif remaining < 120 or remaining > 780:
+            elif not SIMULATE and (remaining < 120 or remaining > 780):
                 action = "outside_window"
             elif current_bal is not None and current_bal < MIN_BALANCE_FLOOR:
                 action = "balance_floor"
             elif daily_pnl <= -DAILY_LOSS_LIMIT_CENTS:
                 action = "loss_limit_hit"
-            elif agreement < 2:
+            elif agreement < SIM_MIN_AGREEMENT:
                 action = "no_consensus"
             else:
                 if direction == "up" and 0 < yes_ask <= MAX_ENTRY_PRICE:
@@ -555,7 +567,7 @@ def main():
                 "trades_today": trade_count,
                 "wins": win_count,
                 "losses": loss_count,
-                "rule": "xgb+mom calibrated_ev" if decision_mode == "calibrated_ev" else "xgb+mom conjunction",
+                "rule": signal_rule,
                 "decision_mode": decision_mode,
                 "price_bucket": price_bucket,
                 "entry_side": side,
@@ -642,6 +654,8 @@ def main():
                                     f"BTC=${btc:,.0f}\n" if btc else "")
                     traded_tickers.add(ticker)
                     trade_count += 1
+                    alert_trade_placed(ticker, side, price_cents, contracts,
+                                       edge * 100, strategy=f"crypto_sim:{signal_rule}")
 
                     ledger.add(OrderRecord(
                         strategy="crypto_sim",

@@ -1,13 +1,33 @@
 from __future__ import annotations
 
+import logging
+import time
+
 import httpx
 
 from config.settings import settings
 from .auth import KalshiAuth
 
+logger = logging.getLogger(__name__)
+
+# Retryable HTTP status codes (GET only — never retry POST/order placement)
+_RETRYABLE_STATUS = {429, 500, 502, 503}
+_MAX_RETRIES = 3
+_BACKOFF_BASE_S = 1.0
+
+# Simple token bucket rate limiter
+_RATE_LIMIT_RPS = 10
+_MIN_INTERVAL_S = 1.0 / _RATE_LIMIT_RPS
+
 
 class KalshiClient:
-    """Full Kalshi REST client with RSA-PSS authentication."""
+    """Full Kalshi REST client with RSA-PSS authentication.
+
+    Features:
+    - Rate limiting: 10 req/s token bucket
+    - Retry with exponential backoff on GET 429/5xx (never retries POST)
+    - Methods return raw dicts (callers can wrap in typed models)
+    """
 
     API_PREFIX = "/trade-api/v2"
 
@@ -15,10 +35,19 @@ class KalshiClient:
         self.base_url = settings.KALSHI_BASE_URL
         self.auth = KalshiAuth(settings.KALSHI_API_KEY_ID, settings.KALSHI_PRIVATE_KEY_PATH)
         self.http = httpx.Client(timeout=30.0)
+        self._last_request_time: float = 0.0
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _rate_limit(self) -> None:
+        """Simple token bucket: enforce minimum interval between requests."""
+        now = time.monotonic()
+        elapsed = now - self._last_request_time
+        if elapsed < _MIN_INTERVAL_S:
+            time.sleep(_MIN_INTERVAL_S - elapsed)
+        self._last_request_time = time.monotonic()
 
     def _request(
         self,
@@ -29,26 +58,47 @@ class KalshiClient:
     ) -> dict:
         """Make an authenticated request to the Kalshi API.
 
-        Args:
-            method: HTTP method (GET, POST, DELETE).
-            path: Path relative to the API prefix, e.g. /portfolio/balance.
-            params: Optional query parameters.
-            json_body: Optional JSON body for POST requests.
-
-        Returns:
-            Parsed JSON response as a dict.
+        GET requests retry on 429/5xx with exponential backoff.
+        POST/DELETE requests are NOT retried (no idempotency key).
         """
         full_path = f"{self.API_PREFIX}{path}"
         url = f"{self.base_url}{path}"
-        headers = self.auth.sign_request(method.upper(), full_path)
+        method_upper = method.upper()
+        can_retry = method_upper == "GET"
+        max_attempts = _MAX_RETRIES if can_retry else 1
 
-        response = self.http.request(
-            method=method.upper(),
-            url=url,
-            headers=headers,
-            params=params,
-            json=json_body,
-        )
+        for attempt in range(max_attempts):
+            self._rate_limit()
+            headers = self.auth.sign_request(method_upper, full_path)
+
+            try:
+                response = self.http.request(
+                    method=method_upper,
+                    url=url,
+                    headers=headers,
+                    params=params,
+                    json=json_body,
+                )
+            except httpx.TransportError as exc:
+                if attempt < max_attempts - 1 and can_retry:
+                    wait = _BACKOFF_BASE_S * (2 ** attempt)
+                    logger.warning("Transport error on %s %s (attempt %d), retrying in %.1fs: %s",
+                                   method_upper, path, attempt + 1, wait, exc)
+                    time.sleep(wait)
+                    continue
+                raise
+
+            if response.status_code in _RETRYABLE_STATUS and attempt < max_attempts - 1 and can_retry:
+                wait = _BACKOFF_BASE_S * (2 ** attempt)
+                logger.warning("HTTP %d on %s %s (attempt %d), retrying in %.1fs",
+                               response.status_code, method_upper, path, attempt + 1, wait)
+                time.sleep(wait)
+                continue
+
+            response.raise_for_status()
+            return response.json()
+
+        # Should not reach here, but just in case
         response.raise_for_status()
         return response.json()
 
@@ -120,6 +170,11 @@ class KalshiClient:
             params["status"] = status
         data = self._request("GET", "/portfolio/orders", params=params or None)
         return data.get("orders", [])
+
+    def get_order(self, order_id: str) -> dict:
+        """Get a single order by ID."""
+        data = self._request("GET", f"/portfolio/orders/{order_id}")
+        return data.get("order", data)
 
     def cancel_order(self, order_id: str) -> dict:
         """Cancel an open order by ID."""

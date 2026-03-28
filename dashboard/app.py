@@ -158,6 +158,38 @@ def restart_bot(name: str):
     return bots.restart(name)
 
 
+@app.get("/api/execution")
+def get_execution():
+    """Execution quality metrics from order ledger."""
+    return {
+        "all": ledger.get_execution_stats(),
+        "crypto": ledger.get_execution_stats("crypto"),
+        "crypto_sim": ledger.get_execution_stats("crypto_sim"),
+        "weather": ledger.get_execution_stats("weather"),
+    }
+
+
+@app.get("/api/alerts")
+def get_alerts():
+    """Recent alerts from file."""
+    from engine.alerts import get_recent_alerts
+    return {"alerts": get_recent_alerts(50)}
+
+
+@app.get("/api/archive/status")
+def get_archive_status():
+    """Archive health info."""
+    from engine.market_archive import get_archive_status as _get_status
+    return _get_status()
+
+
+@app.get("/api/calibration/weather")
+def get_weather_calibration():
+    """Weather calibration summary."""
+    from engine.weather_calibration import calibration_summary
+    return calibration_summary()
+
+
 @app.get("/api/logs")
 def get_logs():
     """Return live state from both traders."""

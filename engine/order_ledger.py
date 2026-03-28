@@ -23,7 +23,7 @@ class OrderRecord:
     market_type: str  # "btc_15m", "weather_high", "weather_low"
     ticker: str
     order_id: str = ""
-    status: str = "pending"  # pending/resting/filled/cancelled/rejected/settled
+    status: str = "pending"  # pending/resting/filled/cancelled/rejected/settled/simulated
     submitted_side: str = ""  # "yes" or "no"
     submitted_price_cents: int = 0
     submitted_count: int = 0
@@ -35,6 +35,9 @@ class OrderRecord:
     updated_at: str = ""
     session_tag: str = ""  # "us_core", "us_off", "weekend"
     signal_ref: str = ""  # vote summary or forecast ref
+    # Execution metrics (Phase 1C)
+    slippage_cents: int = 0  # filled_price - submitted_price
+    time_to_fill_ms: int = 0  # submission to fill latency
 
 
 class OrderLedger:
@@ -111,3 +114,32 @@ class OrderLedger:
         wins = sum(1 for r in settled if r["pnl_cents"] > 0)
         pnl = sum(r["pnl_cents"] for r in settled)
         return {"trades": len(settled), "wins": wins, "losses": len(settled) - wins, "pnl": pnl}
+
+    def get_execution_stats(self, strategy: str = None) -> dict:
+        """Compute execution quality metrics."""
+        all_recs = [r for r in self._records
+                    if strategy is None or r["strategy"] == strategy]
+        if not all_recs:
+            return {"total_orders": 0}
+
+        filled = [r for r in all_recs if r["status"] in ("filled", "settled", "simulated")]
+        cancelled = [r for r in all_recs if r["status"] == "cancelled"]
+        expired = [r for r in all_recs if r["status"] == "expired"]
+
+        slippages = [r.get("slippage_cents", 0) for r in filled if r.get("slippage_cents", 0) != 0]
+        fill_times = [r.get("time_to_fill_ms", 0) for r in filled if r.get("time_to_fill_ms", 0) > 0]
+
+        total = len(all_recs)
+        return {
+            "total_orders": total,
+            "filled_count": len(filled),
+            "cancelled_count": len(cancelled),
+            "expired_count": len(expired),
+            "fill_ratio": len(filled) / total if total else 0,
+            "cancel_ratio": len(cancelled) / total if total else 0,
+            "missed_fill_count": len(expired),
+            "slippage_mean": sum(slippages) / len(slippages) if slippages else 0,
+            "slippage_worst": max(slippages, default=0),
+            "fill_time_mean_ms": sum(fill_times) / len(fill_times) if fill_times else 0,
+            "fill_time_worst_ms": max(fill_times, default=0),
+        }

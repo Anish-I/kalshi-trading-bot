@@ -239,6 +239,31 @@ class WeatherMarketAnalyzer:
 
                 suggested_price_cents = max(1, min(99, round(suggested_price * 100)))
 
+                # --- Guardrail 1: Extreme prices ---
+                if side == "NO" and suggested_price_cents > 85:
+                    logger.debug("Skipping %s NO@%dc (too expensive)", ticker, suggested_price_cents)
+                    continue
+                if side == "YES" and suggested_price_cents < 5:
+                    logger.debug("Skipping %s YES@%dc (lottery ticket)", ticker, suggested_price_cents)
+                    continue
+
+                # --- Guardrail 2: Model probability floor ---
+                # A near-0% model prob means the strike is far from the
+                # Gaussian mean — not a real signal, just tail noise.
+                if side == "YES" and model_prob < 0.03:
+                    logger.debug("Skipping %s YES model_prob=%.1f%% (floor)", ticker, model_prob * 100)
+                    continue
+                if side == "NO" and (1.0 - model_prob) < 0.03:
+                    logger.debug("Skipping %s NO model_prob_no=%.1f%% (floor)", ticker, (1 - model_prob) * 100)
+                    continue
+
+                # --- Guardrail 3: Edge cap ---
+                # 50%+ edge means model and market violently disagree.
+                # With 0/10 track record, the model is wrong.
+                if edge > 0.50:
+                    logger.debug("Skipping %s edge=%.0f%% (cap)", ticker, edge * 100)
+                    continue
+
                 opportunities.append({
                     "ticker": ticker,
                     "city": city_name,

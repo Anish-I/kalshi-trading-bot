@@ -13,6 +13,7 @@ from weather.open_meteo_client import OpenMeteoClient
 from weather.forecast_engine import WeatherForecastEngine
 from weather.market_analyzer import WeatherMarketAnalyzer
 from config.settings import WEATHER_CITIES, CITY_TIERS, settings
+from engine.alerts import alert_trade_placed, alert_settlement, alert_risk_halt
 from engine.order_ledger import OrderLedger, OrderRecord
 
 logger = logging.getLogger(__name__)
@@ -283,6 +284,7 @@ class WeatherTrader:
             can_trade, reason = self.risk_manager.can_trade()
             if not can_trade:
                 logger.warning("Risk manager blocked trading: %s", reason)
+                alert_risk_halt(reason, self.risk_manager.daily_pnl_cents, strategy="weather")
                 break
 
             size_ok, size_reason = self.risk_manager.check_order_size(contracts_per_trade)
@@ -338,6 +340,8 @@ class WeatherTrader:
                     opp["edge"] * 100,
                     order_resp.get("order", {}).get("order_id", "unknown"),
                 )
+                alert_trade_placed(ticker, side, price_cents, contracts_per_trade,
+                                   opp["edge"] * 100, strategy="weather")
             except Exception:
                 logger.error("Failed to place order on %s", ticker, exc_info=True)
                 continue
@@ -412,7 +416,7 @@ class WeatherTrader:
                 continue
 
             status = market.get("status", "")
-            if status != "settled":
+            if status not in ("settled", "finalized"):
                 logger.debug("%s status=%s (not settled)", ticker, status)
                 continue
 
@@ -446,6 +450,7 @@ class WeatherTrader:
                 "SETTLED  %s  side=%s  result=%s  pnl=%+dc  outcome=%s",
                 ticker, position_side, result, pnl, outcome,
             )
+            alert_settlement(ticker, outcome, pnl, strategy="weather")
 
             settled.append({
                 "ticker": ticker,
