@@ -40,7 +40,7 @@ class WeatherTrader:
         self.risk_manager = RiskManager(
             max_contracts=settings.WEATHER_MAX_CONTRACTS,
             daily_loss_limit_cents=int(settings.DAILY_LOSS_LIMIT_CENTS * 0.4),
-            consecutive_loss_halt=3,
+            consecutive_loss_halt=2,
         )
 
         # --- Position tracking ---
@@ -75,7 +75,7 @@ class WeatherTrader:
 
         logger.info(
             "WeatherTrader initialised  |  max_contracts=%d  daily_loss=%dc  "
-            "consecutive_halt=3  edge_threshold=%.0f%%",
+            "consecutive_halt=2  edge_threshold=%.0f%%",
             settings.WEATHER_MAX_CONTRACTS,
             int(settings.DAILY_LOSS_LIMIT_CENTS * 0.4),
             settings.WEATHER_EDGE_THRESHOLD * 100,
@@ -248,7 +248,7 @@ class WeatherTrader:
         self,
         opportunities: list[dict],
         max_trades: int = 3,
-        contracts_per_trade: int = 10,
+        contracts_per_trade: int = 5,
     ) -> list[dict]:
         """Place orders on the best opportunities.
 
@@ -270,6 +270,7 @@ class WeatherTrader:
 
         for opp in opportunities[:max_trades]:
             ticker = opp["ticker"]
+            order_contracts = contracts_per_trade
 
             # --- Balance floor guardrail ---
             try:
@@ -287,11 +288,6 @@ class WeatherTrader:
                 alert_risk_halt(reason, self.risk_manager.daily_pnl_cents, strategy="weather")
                 break
 
-            size_ok, size_reason = self.risk_manager.check_order_size(contracts_per_trade)
-            if not size_ok:
-                logger.warning("Order size rejected: %s", size_reason)
-                continue
-
             # --- Duplicate position check ---
             if self.position_manager.get_position(ticker) is not None or ticker in self._resting_orders:
                 logger.info("Already have open position on %s, skipping", ticker)
@@ -304,16 +300,21 @@ class WeatherTrader:
                 logger.info("Skipping tier-3 city %s (MAE > 3.5F)", city_short)
                 continue
             elif tier == 2:
-                contracts_per_trade = max(1, int(contracts_per_trade * settings.WEATHER_TIER2_SIZE_MULTIPLIER))
+                order_contracts = max(1, int(order_contracts * settings.WEATHER_TIER2_SIZE_MULTIPLIER))
             elif tier == 1:
-                contracts_per_trade = max(1, int(contracts_per_trade * settings.WEATHER_TIER1_SIZE_MULTIPLIER))
+                order_contracts = max(1, int(order_contracts * settings.WEATHER_TIER1_SIZE_MULTIPLIER))
 
             # --- Bracket sizing ---
             if opp.get("strike_type") == "between":
                 if opp["edge"] < 0.25:
                     logger.info("Skipping bracket %s (edge %.0f%% < 25%%)", ticker, opp["edge"] * 100)
                     continue
-                contracts_per_trade = max(1, contracts_per_trade // 3)
+                order_contracts = max(1, order_contracts // 3)
+
+            size_ok, size_reason = self.risk_manager.check_order_size(order_contracts)
+            if not size_ok:
+                logger.warning("Order size rejected: %s", size_reason)
+                continue
 
             # --- Build order ---
             side = opp["side"].lower()  # "yes" or "no"
@@ -328,7 +329,7 @@ class WeatherTrader:
                     ticker=ticker,
                     side=side,
                     action="buy",
-                    count=contracts_per_trade,
+                    count=order_contracts,
                     order_type="limit",
                     yes_price=yes_price,
                     no_price=no_price,
@@ -336,11 +337,11 @@ class WeatherTrader:
                 logger.info(
                     "ORDER PLACED  ticker=%s  side=%s  price=%dc  contracts=%d  edge=%.1f%%  "
                     "order_id=%s",
-                    ticker, side, price_cents, contracts_per_trade,
+                    ticker, side, price_cents, order_contracts,
                     opp["edge"] * 100,
                     order_resp.get("order", {}).get("order_id", "unknown"),
                 )
-                alert_trade_placed(ticker, side, price_cents, contracts_per_trade,
+                alert_trade_placed(ticker, side, price_cents, order_contracts,
                                    opp["edge"] * 100, strategy="weather")
             except Exception:
                 logger.error("Failed to place order on %s", ticker, exc_info=True)
@@ -354,7 +355,7 @@ class WeatherTrader:
             if status == "executed":
                 fill_count, fill_cost = self._extract_fill_details(
                     order_data,
-                    contracts_per_trade,
+                    order_contracts,
                     price_cents,
                 )
                 self.position_manager.open_position(
@@ -365,16 +366,16 @@ class WeatherTrader:
                 self.ledger.add(OrderRecord(strategy="weather", market_type=f"weather_{city_type}", ticker=ticker, order_id=order_id, status="filled", submitted_side=side, submitted_price_cents=price_cents, submitted_count=fill_count, filled_price_cents=fill_cost, filled_count=fill_count))
                 self.ledger.save()
             elif status == "resting" and order_id:
-                self._resting_orders[ticker] = (order_id, side, contracts_per_trade, price_cents)
+                self._resting_orders[ticker] = (order_id, side, order_contracts, price_cents)
                 logger.info("Weather order resting: %s (%s)", ticker, order_id)
-                self.ledger.add(OrderRecord(strategy="weather", market_type=f"weather_{opp.get('strike_type','')}", ticker=ticker, order_id=order_id, status="resting", submitted_side=side, submitted_price_cents=price_cents, submitted_count=contracts_per_trade))
+                self.ledger.add(OrderRecord(strategy="weather", market_type=f"weather_{opp.get('strike_type','')}", ticker=ticker, order_id=order_id, status="resting", submitted_side=side, submitted_price_cents=price_cents, submitted_count=order_contracts))
                 self.ledger.save()
 
             submitted.append({
                 "ticker": ticker,
                 "side": side,
                 "price_cents": price_cents,
-                "contracts": contracts_per_trade,
+                "contracts": order_contracts,
                 "edge": opp["edge"],
                 "city": opp.get("city", ""),
                 "model_prob": opp.get("model_prob", 0),
