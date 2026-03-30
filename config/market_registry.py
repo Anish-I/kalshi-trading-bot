@@ -56,6 +56,18 @@ MARKET_FAMILIES = {
         calibration_path="D:/kalshi-models/weather_calibration.json",
         notes="GFS ensemble + NWS. Risk-halted after 0/10.",
     ),
+    "boil_b5": MarketFamily(
+        name="BOIL $5 Barrier",
+        series_prefix="BOILB5",
+        strategy_type="threshold_barrier",
+        underlying_feed="boil",
+        settlement_source="kalshi_api",
+        max_contracts=5,
+        budget_cents=2000,
+        sim_enabled=False,
+        live_enabled=False,
+        notes="Phase 4 stretch - only after semantics and feed quality are confirmed.",
+    ),
 }
 
 # --- Phase 4 candidates (not yet active) ---

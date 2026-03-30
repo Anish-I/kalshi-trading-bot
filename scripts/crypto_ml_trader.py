@@ -408,6 +408,27 @@ def main():
             btc = get_btc_price()
             market_mid = (yes_bid + yes_ask) / 2 if yes_ask > 0 else 0.5
 
+            # --- Paired YES+NO arb check ---
+            # If YES_ask + NO_ask < $1, buying both guarantees profit
+            if yes_ask > 0 and no_ask > 0:
+                pair_cost = yes_ask + no_ask
+                pair_profit_cents = int((1.0 - pair_cost) * 100)
+                if pair_profit_cents >= 3 and ticker not in traded_tickers:  # min 3c profit after fees
+                    yes_cents = int(round(yes_ask * 100))
+                    no_cents = int(round(no_ask * 100))
+                    if SIMULATE:
+                        log.info(">>> PAIR ARB SIM: %s YES@%dc + NO@%dc = %dc cost, +%dc guaranteed profit",
+                                 ticker, yes_cents, no_cents, int(pair_cost * 100), pair_profit_cents)
+                        if _sim_trade_log:
+                            with open(_sim_trade_log, "a") as f:
+                                f.write(f"{datetime.now(timezone.utc).isoformat()} PAIR_ARB {ticker} "
+                                        f"YES@{yes_cents}c NO@{no_cents}c cost={int(pair_cost*100)}c "
+                                        f"profit={pair_profit_cents}c BTC=${btc:,.0f}\n" if btc else "")
+                        alert_trade_placed(ticker, "PAIR", int(pair_cost * 100), 1,
+                                           pair_profit_cents, strategy="crypto_sim:pair_arb")
+                        traded_tickers.add(ticker)
+                    # Don't place real paired orders yet — needs atomic execution
+
             # --- Gather signals from all 4 models ---
 
             # Model 1: XGBoost

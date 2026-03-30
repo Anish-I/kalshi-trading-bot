@@ -7,9 +7,22 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from config.settings import settings, CITY_BIAS_F
+from config.settings import CITY_TIERS, settings
+from engine.weather_bias import get_city_bias
+from engine.weather_calibration import (
+    edge_bucket_label,
+    load_weather_calibration,
+    should_skip_bucket,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _get_city_tier(city_short: str) -> int:
+    for tier, cities in CITY_TIERS.items():
+        if city_short in cities:
+            return tier
+    return 3
 
 
 class WeatherMarketAnalyzer:
@@ -19,6 +32,7 @@ class WeatherMarketAnalyzer:
     def __init__(self, kalshi_client, forecast_engine):
         self.kalshi = kalshi_client
         self.engine = forecast_engine
+        self._calibration: dict = {}
 
     # ------------------------------------------------------------------ #
     #  Ticker parsing
@@ -94,7 +108,11 @@ class WeatherMarketAnalyzer:
         snapshot_dir = Path(settings.DATA_DIR) / "weather_snapshots"
         snapshot_dir.mkdir(parents=True, exist_ok=True)
 
-        bias = CITY_BIAS_F.get(city.get("short", ""), 0.0)
+        bias = get_city_bias(
+            city.get("short", ""),
+            city.get("type", "high"),
+            target_date,
+        )
 
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         try:
@@ -109,9 +127,9 @@ class WeatherMarketAnalyzer:
             "issue_time_utc": datetime.now(timezone.utc).isoformat(),
             "lead_days": lead_days,
             "member_values_f": ensemble.get("members", []),
-            "mean_f": round(ensemble.get("mean", mean), 2),
+            "mean_f": round(ensemble.get("mean", mean + bias), 2),
             "std_f": round(ensemble.get("std", std), 2),
-            "bias_adjusted_mean_f": round(mean - bias, 2),
+            "bias_adjusted_mean_f": round(mean, 2),
             "source": "open_meteo_gfs_31",
             "n_members": ensemble.get("n_members", 0),
         }
@@ -216,8 +234,8 @@ class WeatherMarketAnalyzer:
                 no_bid = float(mkt.get("no_bid_dollars", 0) or 0)
                 no_ask = float(mkt.get("no_ask_dollars", 0) or 0)
 
-                # Skip markets with no valid quotes
-                if yes_bid == 0 and yes_ask == 0:
+                # Skip markets with no valid quotes on either side.
+                if yes_bid == 0 and yes_ask == 0 and no_bid == 0 and no_ask == 0:
                     logger.debug("No quotes for %s, skipping", ticker)
                     continue
 
@@ -264,10 +282,22 @@ class WeatherMarketAnalyzer:
                     logger.debug("Skipping %s edge=%.0f%% (cap)", ticker, edge * 100)
                     continue
 
+                city_short = city.get("short", "")
+                calibration_bucket = edge_bucket_label(edge)
+                skip_bucket, calibration_reason = should_skip_bucket(
+                    self._calibration,
+                    _get_city_tier(city_short),
+                    strike_type,
+                    calibration_bucket,
+                )
+                if skip_bucket:
+                    logger.debug("Skipping %s via calibration gate: %s", ticker, calibration_reason)
+                    continue
+
                 opportunities.append({
                     "ticker": ticker,
                     "city": city_name,
-                    "city_short": city.get("short", ""),
+                    "city_short": city_short,
                     "strike_type": strike_type,
                     "strike_low": strike_low,
                     "strike_high": strike_high,
@@ -280,6 +310,8 @@ class WeatherMarketAnalyzer:
                     "suggested_price_cents": suggested_price_cents,
                     "forecast_mean": round(mean, 1),
                     "forecast_std": round(std, 1),
+                    "calibration_bucket": calibration_bucket,
+                    "calibration_reason": calibration_reason,
                 })
 
         # Sort by edge descending
@@ -305,6 +337,7 @@ class WeatherMarketAnalyzer:
         list[dict]
             Filtered and sorted opportunities.
         """
+        self._calibration = load_weather_calibration()
         all_opps: list[dict] = []
 
         for city in cities:

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from scipy.stats import norm
 
-from config.settings import CITY_BIAS_F
+from engine.weather_bias import get_city_bias
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,11 @@ class WeatherForecastEngine:
             raise ValueError(f"No forecast data available for {name} on {target_date}")
 
         # --- Bias correction ---
-        bias = CITY_BIAS_F.get(city.get("short", ""), 0.0)
+        bias = get_city_bias(
+            city.get("short", ""),
+            city.get("type", "high"),
+            target_date,
+        )
         forecast_mean -= bias
 
         # --- Forecast uncertainty ---
@@ -150,7 +154,11 @@ class WeatherForecastEngine:
             raise ValueError(f"No low temp forecast for {name} on {target_date}")
 
         # --- Bias correction ---
-        bias = CITY_BIAS_F.get(city.get("short", ""), 0.0)
+        bias = get_city_bias(
+            city.get("short", ""),
+            city.get("type", "low"),
+            target_date,
+        )
         forecast_mean -= bias
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -214,8 +222,11 @@ class WeatherForecastEngine:
             ensemble = self._get_cached_ensemble(city, target_date, temp_var)
 
             # Apply city bias correction to ensemble members
-            from config.settings import CITY_BIAS_F
-            bias = CITY_BIAS_F.get(city.get("short", ""), 0.0)
+            bias = get_city_bias(
+                city.get("short", ""),
+                city.get("type", "high" if temp_var.endswith("_max") else "low"),
+                target_date,
+            )
             if bias != 0.0 and ensemble.get("members"):
                 corrected = {"members": [m - bias for m in ensemble["members"]],
                              "n_members": ensemble["n_members"]}

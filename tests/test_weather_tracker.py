@@ -136,3 +136,43 @@ def test_execute_trades_tracks_status_and_skips_resting_duplicate(tmp_path, monk
     assert submitted[0]["status"] == "resting"
     assert trader.position_manager.get_position("KXTEST-DUP") is None
     assert trader._resting_orders["KXTEST-DUP"] == ("order-1", "yes", 5, 55)
+
+
+def test_weather_tier_sizing_does_not_mutate_following_orders(tmp_path, monkeypatch):
+    DummyKalshiClient.next_statuses = ["executed", "executed"]
+    trader = _build_trader(monkeypatch, tmp_path)
+
+    opportunities = [
+        {
+            "ticker": "KXTEST-TIER2",
+            "side": "YES",
+            "suggested_price_cents": 55,
+            "edge": 0.3,
+            "city": "Houston",
+            "city_short": "HOU",
+            "model_prob": 0.75,
+            "market_mid": 0.52,
+            "strike_type": "above",
+        },
+        {
+            "ticker": "KXTEST-TIER1",
+            "side": "YES",
+            "suggested_price_cents": 56,
+            "edge": 0.3,
+            "city": "Phoenix",
+            "city_short": "PHX",
+            "model_prob": 0.76,
+            "market_mid": 0.53,
+            "strike_type": "above",
+        },
+    ]
+
+    submitted = trader.execute_trades(opportunities, max_trades=2, contracts_per_trade=5)
+
+    assert submitted[0]["contracts"] == 2
+    assert submitted[1]["contracts"] == 5
+
+
+def test_weather_trader_uses_recovery_consecutive_loss_halt(tmp_path, monkeypatch):
+    trader = _build_trader(monkeypatch, tmp_path)
+    assert trader.risk_manager.consecutive_loss_halt == 2

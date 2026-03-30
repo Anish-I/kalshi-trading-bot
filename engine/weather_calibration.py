@@ -16,6 +16,19 @@ logger = logging.getLogger(__name__)
 CALIBRATION_PATH = Path(settings.MODEL_DIR) / "weather_calibration.json"
 
 
+def edge_bucket_label(edge: float) -> str:
+    """Bucket edge size into coarse percent ranges."""
+    if edge < 0.10:
+        return "<10%"
+    if edge < 0.20:
+        return "10-20%"
+    if edge < 0.30:
+        return "20-30%"
+    if edge < 0.50:
+        return "30-50%"
+    return "50%+"
+
+
 def load_weather_calibration() -> dict:
     """Load the weather calibration artifact."""
     if not CALIBRATION_PATH.exists():
@@ -56,16 +69,13 @@ def should_skip_bucket(
     if not bucket.get("sufficient_data", False):
         return False, f"insufficient_data (n={bucket.get('n_markets', 0)})"
 
-    # Use shrunk win rate for evaluation
-    shrunk_rate = bucket.get("shrunk_win_rate", 0.5)
+    # Use shrunk trade win rate for evaluation. Support the older field name
+    # so legacy artifacts keep loading without crashing.
+    shrunk_rate = bucket.get("shrunk_trade_win_rate", bucket.get("shrunk_win_rate", 0.5))
+    min_rate = calibration.get("min_trade_win_rate", 0.42)
 
-    # Skip if EV is clearly negative
-    # For a 50c contract: EV = shrunk_rate * 50 - (1-shrunk_rate) * 50
-    # Negative when shrunk_rate < 0.5
-    # But cheap contracts (10c) can be +EV even at 15% win rate
-    # So we use a more nuanced check:
-    if shrunk_rate < 0.30:
-        return True, f"low_shrunk_win_rate ({shrunk_rate:.0%})"
+    if shrunk_rate < min_rate:
+        return True, f"low_shrunk_trade_win_rate ({shrunk_rate:.0%} < {min_rate:.0%})"
 
     return False, f"ok (shrunk_rate={shrunk_rate:.0%})"
 
@@ -83,7 +93,7 @@ def calibration_summary() -> dict:
         "generated": cal.get("generated", ""),
         "total_markets": cal.get("total_markets", 0),
         "matched_markets": cal.get("matched_markets", 0),
-        "global_win_rate": cal.get("global_win_rate", 0),
+        "global_trade_win_rate": cal.get("global_trade_win_rate", cal.get("global_win_rate", 0)),
         "n_buckets": len(buckets),
         "n_sufficient": sum(1 for b in buckets.values() if b.get("sufficient_data")),
     }
