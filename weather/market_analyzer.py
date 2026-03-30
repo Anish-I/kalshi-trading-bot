@@ -258,7 +258,8 @@ class WeatherMarketAnalyzer:
                 suggested_price_cents = max(1, min(99, round(suggested_price * 100)))
 
                 # --- Guardrail 1: Extreme prices ---
-                if side == "NO" and suggested_price_cents > 85:
+                # NO above 50c = risk more than you win. Model isn't accurate enough.
+                if side == "NO" and suggested_price_cents > 50:
                     logger.debug("Skipping %s NO@%dc (too expensive)", ticker, suggested_price_cents)
                     continue
                 if side == "YES" and suggested_price_cents < 5:
