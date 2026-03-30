@@ -133,19 +133,25 @@ def archive_crypto(client: KalshiClient) -> int:
                 yes_levels = ob_fp.get("yes_dollars", ob_fp.get("yes", []))
                 no_levels = ob_fp.get("no_dollars", ob_fp.get("no", []))
 
-                # Top-of-book for quick pair analysis
+                # Top-of-book: these are BIDS (ascending, best=last)
                 if yes_levels:
-                    record["yes_ask"] = float(yes_levels[0][0])
+                    record["best_yes_bid"] = float(yes_levels[-1][0])
                 if no_levels:
-                    record["no_ask"] = float(no_levels[0][0])
+                    record["best_no_bid"] = float(no_levels[-1][0])
+                # Implied asks: YES_ask = 1 - best_NO_bid, NO_ask = 1 - best_YES_bid
                 if yes_levels and no_levels:
-                    record["pair_cost"] = float(yes_levels[0][0]) + float(no_levels[0][0])
+                    byb = float(yes_levels[-1][0])
+                    bnb = float(no_levels[-1][0])
+                    record["implied_yes_ask"] = round(1.0 - bnb, 4)
+                    record["implied_no_ask"] = round(1.0 - byb, 4)
+                    record["taker_pair_cost"] = round(record["implied_yes_ask"] + record["implied_no_ask"], 4)
+                    record["maker_pair_cost"] = round((byb + 0.01) + (bnb + 0.01), 4)
 
                 for i in range(ORDERBOOK_DEPTH):
-                    record[f"yes_ask_{i}_price"] = int(float(yes_levels[i][0]) * 100) if i < len(yes_levels) else 0
-                    record[f"yes_ask_{i}_qty"] = int(float(yes_levels[i][1])) if i < len(yes_levels) else 0
-                    record[f"no_ask_{i}_price"] = int(float(no_levels[i][0]) * 100) if i < len(no_levels) else 0
-                    record[f"no_ask_{i}_qty"] = int(float(no_levels[i][1])) if i < len(no_levels) else 0
+                    record[f"yes_bid_{i}_price"] = int(float(yes_levels[i][0]) * 100) if i < len(yes_levels) else 0
+                    record[f"yes_bid_{i}_qty"] = int(float(yes_levels[i][1])) if i < len(yes_levels) else 0
+                    record[f"no_bid_{i}_price"] = int(float(no_levels[i][0]) * 100) if i < len(no_levels) else 0
+                    record[f"no_bid_{i}_qty"] = int(float(no_levels[i][1])) if i < len(no_levels) else 0
             except Exception:
                 log.debug("Orderbook fetch failed for %s", ticker, exc_info=True)
 

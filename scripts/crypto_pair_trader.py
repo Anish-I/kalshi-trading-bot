@@ -92,7 +92,7 @@ while True:
             time.sleep(args.interval)
             continue
 
-        # Evaluate pair opportunity
+        # Evaluate pair opportunity (correct: bids→implied asks→maker pricing)
         opp = evaluate_pair_opportunity(ob, pair_cap_cents=args.pair_cap)
 
         # Write state for dashboard
@@ -102,13 +102,18 @@ while True:
             "scan": scan_count,
             "ticker": ticker,
             "remaining_s": int(remaining),
-            "yes_ask": opp["yes_ask_cents"],
-            "no_ask": opp["no_ask_cents"],
-            "pair_cost": opp["pair_cost_cents"],
-            "gross_profit": opp["gross_profit_cents"],
-            "net_profit": opp["net_profit_cents"],
-            "tradeable": opp["tradeable"],
-            "max_pairs": opp["max_pairs"],
+            "best_yes_bid": opp.get("best_yes_bid", 0),
+            "best_no_bid": opp.get("best_no_bid", 0),
+            "implied_yes_ask": opp.get("implied_yes_ask", 0),
+            "implied_no_ask": opp.get("implied_no_ask", 0),
+            "taker_pair_cost": opp.get("taker_pair_cost", 0),
+            "taker_arb": opp.get("taker_arb", False),
+            "maker_yes": opp.get("maker_yes_price", 0),
+            "maker_no": opp.get("maker_no_price", 0),
+            "maker_cost": opp.get("maker_pair_cost", 0),
+            "maker_net": opp.get("maker_net", 0),
+            "maker_tradeable": opp.get("maker_tradeable", False),
+            "spread": opp.get("spread_cents", 0),
             "active_pairs": len(pair_tracker.active),
             "stats": pair_tracker.get_stats(),
             "risk": risk.summary(),
@@ -118,66 +123,69 @@ while True:
         except Exception:
             pass
 
-        if not opp["tradeable"]:
+        if not opp["maker_tradeable"]:
             if scan_count % 10 == 0:
-                log.info("Scan #%d %s: cost=%dc gross=%dc net=%.1fc — no opportunity",
-                         scan_count, ticker, opp["pair_cost_cents"],
-                         opp["gross_profit_cents"], opp["net_profit_cents"])
+                log.info("Scan #%d %s: taker=%dc(no arb) maker=%dc(net=%.1fc) spread=%dc",
+                         scan_count, ticker, opp["taker_pair_cost"],
+                         opp["maker_pair_cost"], opp["maker_net"], opp["spread_cents"])
             time.sleep(args.interval)
             continue
 
         # Risk check
-        can_open, reason = risk.can_open_pair(opp["pair_cost_cents"])
+        can_open, reason = risk.can_open_pair(opp["maker_pair_cost"])
         if not can_open:
             log.info("Risk blocked: %s", reason)
             time.sleep(args.interval)
             continue
 
-        # --- TRADE ---
-        ya = opp["yes_ask_cents"]
-        na = opp["no_ask_cents"]
-        net = opp["net_profit_cents"]
+        # --- TRADE (maker strategy: post limits at best_bid+1) ---
+        my = opp["maker_yes_price"]
+        mn = opp["maker_no_price"]
+        mc = opp["maker_pair_cost"]
+        mnet = opp["maker_net"]
 
         if args.mode == "sim":
-            # Virtual trade
-            pair = pair_tracker.start_pair(ticker, ya, na, market.get("close_time", ""))
-            pair.record_yes_fill(ya, 1)
-            pair.record_no_fill(na, 1)
+            # Virtual maker trade (assumes both fill — optimistic)
+            pair = pair_tracker.start_pair(ticker, my, mn, market.get("close_time", ""))
+            pair.record_yes_fill(my, 1)
+            pair.record_no_fill(mn, 1)
             pair_tracker.complete_pair(ticker)
-            risk.record_entry(ya + na)
-            risk.record_pair_complete(ya + na)
+            risk.record_entry(mc)
+            risk.record_pair_complete(mc)
             traded_tickers.add(ticker)
 
-            log.info(">>> PAIR SIM: %s YES@%dc + NO@%dc = %dc cost, +%.1fc net profit",
-                     ticker, ya, na, ya + na, net)
+            log.info(">>> PAIR SIM (MAKER): %s YES@%dc + NO@%dc = %dc cost, +%.1fc net "
+                     "[bids: Y%dc N%dc | asks: Y%dc N%dc | spread:%dc]",
+                     ticker, my, mn, mc, mnet,
+                     opp["best_yes_bid"], opp["best_no_bid"],
+                     opp["implied_yes_ask"], opp["implied_no_ask"],
+                     opp["spread_cents"])
 
             with open(PAIR_LOG, "a") as f:
-                f.write(f"{datetime.now(timezone.utc).isoformat()} SIM_PAIR "
-                        f"{ticker} YES@{ya}c NO@{na}c cost={ya+na}c "
-                        f"gross={100-ya-na}c net={net:.1f}c\n")
+                f.write(f"{datetime.now(timezone.utc).isoformat()} SIM_MAKER_PAIR "
+                        f"{ticker} YES@{my}c NO@{mn}c cost={mc}c "
+                        f"gross={100-mc}c net={mnet:.1f}c "
+                        f"spread={opp['spread_cents']}c\n")
 
-            alert_trade_placed(ticker, "PAIR", ya + na, 1, net, strategy="crypto_pair:sim")
+            alert_trade_placed(ticker, "MAKER_PAIR", mc, 1, mnet, strategy="crypto_pair:sim")
 
         elif args.mode == "paper":
-            # Record as paper trade (don't place real orders)
-            pair = pair_tracker.start_pair(ticker, ya, na, market.get("close_time", ""))
-            pair.record_yes_fill(ya, 1)
-            pair.record_no_fill(na, 1)
+            pair = pair_tracker.start_pair(ticker, my, mn, market.get("close_time", ""))
+            pair.record_yes_fill(my, 1)
+            pair.record_no_fill(mn, 1)
             pair_tracker.complete_pair(ticker)
-            risk.record_entry(ya + na)
-            risk.record_pair_complete(ya + na)
+            risk.record_entry(mc)
+            risk.record_pair_complete(mc)
             traded_tickers.add(ticker)
 
-            log.info(">>> PAIR PAPER: %s YES@%dc + NO@%dc = %dc, +%.1fc net",
-                     ticker, ya, na, ya + na, net)
-            alert_trade_placed(ticker, "PAIR", ya + na, 1, net, strategy="crypto_pair:paper")
+            log.info(">>> PAIR PAPER (MAKER): %s YES@%dc + NO@%dc = %dc, +%.1fc net",
+                     ticker, my, mn, mc, mnet)
+            alert_trade_placed(ticker, "MAKER_PAIR", mc, 1, mnet, strategy="crypto_pair:paper")
 
         elif args.mode == "live":
-            # Real orders — place both legs
-            log.warning("LIVE MODE: Would place YES@%dc + NO@%dc on %s — NOT IMPLEMENTED YET",
-                        ya, na, ticker)
-            # TODO: implement atomic pair placement with order_group_id
-            # TODO: orphan leg handling with WebSocket monitoring
+            log.warning("LIVE MODE: Would post maker YES@%dc + NO@%dc on %s — NOT IMPLEMENTED",
+                        my, mn, ticker)
+            # TODO: post both limits, monitor fills via WebSocket, handle orphans
 
         time.sleep(args.interval)
 
