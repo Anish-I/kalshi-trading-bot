@@ -59,8 +59,13 @@ def extract_book_from_orderbook(orderbook_response: dict) -> dict:
     best_no_bid_qty = int(float(no_bids[-1][1])) if no_bids else 0
 
     # Implied asks (what it costs to BUY)
-    implied_yes_ask = 100 - best_no_bid_cents if best_no_bid_cents > 0 else 0
-    implied_no_ask = 100 - best_yes_bid_cents if best_yes_bid_cents > 0 else 0
+    # Only valid when BOTH sides have bids; one-sided books can't produce valid asks
+    if best_no_bid_cents > 0 and best_yes_bid_cents > 0:
+        implied_yes_ask = 100 - best_no_bid_cents
+        implied_no_ask = 100 - best_yes_bid_cents
+    else:
+        implied_yes_ask = 0
+        implied_no_ask = 0
 
     return {
         "best_yes_bid": best_yes_bid_cents,

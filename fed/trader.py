@@ -39,6 +39,7 @@ class FedTrader:
         self.client = KalshiClient()
         self.ledger = OrderLedger()
         self.family_limits = FamilyLimits()
+        self._traded_tickers: set[str] = set()
         SHADOW_LOG.parent.mkdir(parents=True, exist_ok=True)
 
     def scan(self) -> dict:
@@ -76,33 +77,37 @@ class FedTrader:
                         best["side"], best["ticker"], best["edge"] * 100,
                         best["threshold"], best["model_prob_above"] * 100)
 
-            # Quote guard
-            mkt = next((m for m in markets if m.get("ticker") == best["ticker"]), {})
-            ya = float(mkt.get("yes_ask", mkt.get("yes_ask_dollars", 0)) or 0)
-            na = float(mkt.get("no_ask", mkt.get("no_ask_dollars", 0)) or 0)
-            yb = float(mkt.get("yes_bid", mkt.get("yes_bid_dollars", 0)) or 0)
-
-            tradeable, guard_reason = check_quote_quality(
-                yes_ask=ya, no_ask=na, yes_bid=yb,
-                model_prob=best["model_prob_above"],
-                side=best["side"].lower(),
-                max_spread_cents=30,  # Fed markets can be wider
-                min_edge_after_fees_pct=0.02,
-            )
-
-            if not tradeable:
-                action = f"quote_guard: {guard_reason}"
-                logger.info("Quote guard blocked: %s", guard_reason)
+            # Already traded this ticker?
+            if best["ticker"] in self._traded_tickers:
+                action = "already_traded"
             else:
-                # Family budget check
-                entry_cents = int(ya * 100) if best["side"] == "YES" else int(na * 100)
-                can_enter, limit_reason = self.family_limits.can_enter(FAMILY_NAME, entry_cents)
+                # Quote guard
+                mkt = next((m for m in markets if m.get("ticker") == best["ticker"]), {})
+                ya = float(mkt.get("yes_ask", mkt.get("yes_ask_dollars", 0)) or 0)
+                na = float(mkt.get("no_ask", mkt.get("no_ask_dollars", 0)) or 0)
+                yb = float(mkt.get("yes_bid", mkt.get("yes_bid_dollars", 0)) or 0)
 
-                if not can_enter:
-                    action = f"family_limit: {limit_reason}"
+                tradeable, guard_reason = check_quote_quality(
+                    yes_ask=ya, no_ask=na, yes_bid=yb,
+                    model_prob=best["model_prob_above"],
+                    side=best["side"].lower(),
+                    max_spread_cents=30,
+                    min_edge_after_fees_pct=0.02,
+                )
+
+                if not tradeable:
+                    action = f"quote_guard: {guard_reason}"
+                    logger.info("Quote guard blocked: %s", guard_reason)
                 else:
-                    action = self._execute(best, entry_cents)
-                    trade_info = best
+                    # Family budget check
+                    entry_cents = int(ya * 100) if best["side"] == "YES" else int(na * 100)
+                    can_enter, limit_reason = self.family_limits.can_enter(FAMILY_NAME, entry_cents)
+
+                    if not can_enter:
+                        action = f"family_limit: {limit_reason}"
+                    else:
+                        action = self._execute(best, entry_cents)
+                        trade_info = best
 
         # 5. Build state
         state = {
@@ -128,6 +133,7 @@ class FedTrader:
         """Execute based on mode."""
         ticker = opp["ticker"]
         side = opp["side"].lower()
+        self._traded_tickers.add(ticker)
 
         if self.mode == "shadow":
             # Just log
