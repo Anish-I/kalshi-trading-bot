@@ -47,6 +47,18 @@ def evaluate_fed_markets(markets: list[dict], signal: dict) -> list[dict]:
         if threshold is None:
             continue
 
+        # Parse settlement date from ticker: KXFED-27APR → April 2027
+        close_time = mkt.get("close_time", "")
+        if close_time:
+            try:
+                from datetime import datetime as _dt
+                settle_date = _dt.fromisoformat(close_time.replace("Z", "+00:00"))
+                months_out = (settle_date.year - _dt.now().year) * 12 + (settle_date.month - _dt.now().month)
+            except Exception:
+                months_out = 0
+        else:
+            months_out = 0
+
         yes_ask = float(mkt.get("yes_ask", mkt.get("yes_ask_dollars", 0)) or 0)
         no_ask = float(mkt.get("no_ask", mkt.get("no_ask_dollars", 0)) or 0)
 
@@ -80,6 +92,7 @@ def evaluate_fed_markets(markets: list[dict], signal: dict) -> list[dict]:
                 "side": side,
                 "edge": round(edge, 4),
                 "days_to_fomc": days_to_fomc,
+                "months_out": months_out,
                 "confidence": _confidence_level(edge, days_to_fomc),
             })
 

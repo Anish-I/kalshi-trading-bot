@@ -39,8 +39,20 @@ class FedTrader:
         self.client = KalshiClient()
         self.ledger = OrderLedger()
         self.family_limits = FamilyLimits()
+        self._traded_tickers_path = Path("D:/kalshi-data/fed_traded_tickers.json")
         self._traded_tickers: set[str] = set()
+        self._load_traded_tickers()
         SHADOW_LOG.parent.mkdir(parents=True, exist_ok=True)
+
+    def _load_traded_tickers(self) -> None:
+        if self._traded_tickers_path.exists():
+            try:
+                self._traded_tickers = set(json.loads(self._traded_tickers_path.read_text()))
+            except Exception:
+                pass
+
+    def _save_traded_tickers(self) -> None:
+        self._traded_tickers_path.write_text(json.dumps(list(self._traded_tickers)))
 
     def scan(self) -> dict:
         """Run one scan cycle. Returns state dict."""
@@ -134,6 +146,7 @@ class FedTrader:
         ticker = opp["ticker"]
         side = opp["side"].lower()
         self._traded_tickers.add(ticker)
+        self._save_traded_tickers()
 
         if self.mode == "shadow":
             # Just log
