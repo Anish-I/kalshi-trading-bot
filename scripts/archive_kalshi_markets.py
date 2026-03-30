@@ -126,19 +126,28 @@ def archive_crypto(client: KalshiClient) -> int:
                 "close_time": mkt.get("close_time", ""),
             }
 
-            # Fetch orderbook
+            # Fetch orderbook — Kalshi returns orderbook_fp with yes_dollars/no_dollars
             try:
                 ob = client.get_orderbook(ticker, depth=ORDERBOOK_DEPTH)
-                ob_data = ob.get("orderbook", ob)
+                ob_fp = ob.get("orderbook_fp", ob.get("orderbook", {}))
+                yes_levels = ob_fp.get("yes_dollars", ob_fp.get("yes", []))
+                no_levels = ob_fp.get("no_dollars", ob_fp.get("no", []))
+
+                # Top-of-book for quick pair analysis
+                if yes_levels:
+                    record["yes_ask"] = float(yes_levels[0][0])
+                if no_levels:
+                    record["no_ask"] = float(no_levels[0][0])
+                if yes_levels and no_levels:
+                    record["pair_cost"] = float(yes_levels[0][0]) + float(no_levels[0][0])
+
                 for i in range(ORDERBOOK_DEPTH):
-                    yes_levels = ob_data.get("yes", [])
-                    no_levels = ob_data.get("no", [])
-                    record[f"yes_bid_{i}_price"] = int(yes_levels[i][0]) if i < len(yes_levels) else 0
-                    record[f"yes_bid_{i}_qty"] = int(yes_levels[i][1]) if i < len(yes_levels) else 0
-                    record[f"no_bid_{i}_price"] = int(no_levels[i][0]) if i < len(no_levels) else 0
-                    record[f"no_bid_{i}_qty"] = int(no_levels[i][1]) if i < len(no_levels) else 0
+                    record[f"yes_ask_{i}_price"] = int(float(yes_levels[i][0]) * 100) if i < len(yes_levels) else 0
+                    record[f"yes_ask_{i}_qty"] = int(float(yes_levels[i][1])) if i < len(yes_levels) else 0
+                    record[f"no_ask_{i}_price"] = int(float(no_levels[i][0]) * 100) if i < len(no_levels) else 0
+                    record[f"no_ask_{i}_qty"] = int(float(no_levels[i][1])) if i < len(no_levels) else 0
             except Exception:
-                pass
+                log.debug("Orderbook fetch failed for %s", ticker, exc_info=True)
 
             records.append(record)
             count += 1
