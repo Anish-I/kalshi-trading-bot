@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # Weather bot settings
     NWS_USER_AGENT: str = "KalshiWeatherBot (kalshi-weather-bot@example.com)"
     WEATHER_EDGE_THRESHOLD: float = 0.20
-    WEATHER_MAX_CONTRACTS: int = 5
+    WEATHER_MAX_CONTRACTS: int = 10
     WEATHER_SCAN_INTERVAL_MINUTES: int = 15
     WEATHER_TIER1_SIZE_MULTIPLIER: float = 1.0
     WEATHER_TIER2_SIZE_MULTIPLIER: float = 0.5

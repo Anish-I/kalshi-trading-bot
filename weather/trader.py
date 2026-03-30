@@ -248,7 +248,7 @@ class WeatherTrader:
         self,
         opportunities: list[dict],
         max_trades: int = 3,
-        contracts_per_trade: int = 5,
+        contracts_per_trade: int = 10,
     ) -> list[dict]:
         """Place orders on the best opportunities.
 
