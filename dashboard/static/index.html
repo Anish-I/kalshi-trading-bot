@@ -103,6 +103,15 @@ td { padding:3px 5px; border-bottom:1px solid #0d1219; }
     <div id="crypto-stats">Loading...</div>
   </div>
 
+  <!-- ROW 2.5: PAIR STRATEGY -->
+  <div class="panel panel-full">
+    <div class="ptitle">Pair Acquisition (YES+NO) <span class="tag tag-sim">SIM</span></div>
+    <div id="pair-panel" style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div id="pair-live">Waiting for data...</div>
+      <div id="pair-log">No pair trades yet</div>
+    </div>
+  </div>
+
   <!-- ROW 3: SYSTEM STATUS + ALERT FEED -->
   <div class="panel">
     <div class="ptitle">System Status</div>
@@ -150,7 +159,7 @@ async function botAction(n,a){try{await fetch(`/api/bots/${n}/${a}`,{method:'POS
 
 async function refresh(){
   try{
-    const [st,tr,al,ex,ar,wc,wb,cs]=await Promise.all([
+    const [st,tr,al,ex,ar,wc,wb,cs,pr]=await Promise.all([
       fetch('/api/status').then(r=>r.json()),
       fetch('/api/trades').then(r=>r.json()),
       fetch('/api/alerts').then(r=>r.json()).catch(()=>({alerts:[]})),
@@ -159,6 +168,7 @@ async function refresh(){
       fetch('/api/calibration/weather').then(r=>r.json()).catch(()=>({loaded:false})),
       fetch('/api/weather/breakdown').then(r=>r.json()).catch(()=>({breakdown:[],summary:{}})),
       fetch('/api/crypto/stats').then(r=>r.json()).catch(()=>({})),
+      fetch('/api/pairs').then(r=>r.json()).catch(()=>({state:{},trades:[]})),
     ]);
 
     // Header
@@ -279,6 +289,35 @@ async function refresh(){
         </div>`;
     } else {
       document.getElementById('crypto-stats').innerHTML='<div style="color:var(--text-dim)">No settled sim trades yet</div>';
+    }
+
+    // PAIR STRATEGY
+    const ps=pr.state||{};
+    const ptrades=pr.trades||[];
+    if(ps.ticker){
+      const netClr=ps.net_profit>0?'var(--green)':'var(--red)';
+      const risk=ps.risk||{};
+      const stats=ps.stats||{};
+      document.getElementById('pair-live').innerHTML=`
+        <div class="stat-row">
+          <div class="sc"><div class="sc-label">Pair Cost</div><div class="sc-val" style="color:${ps.tradeable?'var(--green)':'var(--text)'}">${ps.pair_cost||0}c</div></div>
+          <div class="sc"><div class="sc-label">Net Profit</div><div class="sc-val" style="color:${netClr}">${ps.net_profit>0?'+':''}${(ps.net_profit||0).toFixed(1)}c</div></div>
+          <div class="sc"><div class="sc-label">Completed</div><div class="sc-val">${stats.completed_pairs||0}</div></div>
+          <div class="sc"><div class="sc-label">Orphans</div><div class="sc-val" style="color:${(risk.orphan_rate||0)>30?'var(--red)':'var(--text)'}">${risk.orphans||0}</div></div>
+        </div>
+        <div class="dg">
+          <div class="l">Market</div><div class="v">${(ps.ticker||'').replace('KXBTC15M-','')}</div>
+          <div class="l">YES Ask</div><div class="v">${ps.yes_ask||0}c</div>
+          <div class="l">NO Ask</div><div class="v">${ps.no_ask||0}c</div>
+          <div class="l">Tradeable</div><div class="v">${ps.tradeable?'<span style="color:var(--green)">YES</span>':'<span style="color:var(--text-dim)">NO</span>'}</div>
+          <div class="l">Max Pairs</div><div class="v">${ps.max_pairs||0}</div>
+          <div class="l">Budget</div><div class="v">${risk.exposure_cents||0}/${risk.budget_cents||0}c</div>
+        </div>
+        <div style="font-size:8px;color:var(--text-dim);margin-top:4px">Scan #${ps.scan||0} | ${ps.remaining_s||0}s left | ${ps.mode||'sim'}</div>`;
+    }
+    if(ptrades.length){
+      document.getElementById('pair-log').innerHTML='<div style="font-size:10px;color:var(--text-dim);margin-bottom:4px">Recent Pair Trades</div>'+
+        ptrades.slice().reverse().slice(0,10).map(t=>`<div style="font-size:10px;padding:2px 0;border-bottom:1px solid var(--border);color:var(--green)">${t.substring(11,16)} ${t.substring(t.indexOf('SIM_PAIR')+9)}</div>`).join('');
     }
 
     // ALERTS

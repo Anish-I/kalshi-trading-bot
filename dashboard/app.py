@@ -287,6 +287,29 @@ def get_crypto_stats():
     return stats
 
 
+@app.get("/api/pairs")
+def get_pairs():
+    """Pair trader state and trade log."""
+    state = {}
+    try:
+        f = DATA_DIR / "pair_trader_state.json"
+        if f.exists():
+            state = json.loads(f.read_text())
+    except Exception:
+        pass
+
+    trades = []
+    try:
+        log_path = DATA_DIR / "logs" / "pair_trades.log"
+        if log_path.exists():
+            for line in log_path.read_text().splitlines()[-20:]:
+                trades.append(line)
+    except Exception:
+        pass
+
+    return {"state": state, "trades": trades}
+
+
 @app.get("/api/logs")
 def get_logs():
     """Return live state from both traders."""
