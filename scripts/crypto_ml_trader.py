@@ -84,10 +84,10 @@ if SIMULATE:
     SIM_MIN_AGREEMENT = 1  # lower: single-model signals fire for data generation
     SIM_MIN_EDGE = 0.01  # 1% edge minimum (vs 3% live)
 else:
-    MAX_CONTRACTS = 30
+    MAX_CONTRACTS = 3
     MAX_ENTRY_PRICE = 0.45
     SCAN_INTERVAL = 30
-    DAILY_LOSS_LIMIT_CENTS = 1500
+    DAILY_LOSS_LIMIT_CENTS = 500
     MIN_BALANCE_FLOOR = 10.0
     SIM_MIN_AGREEMENT = 2.0
     SIM_MIN_EDGE = 0.03
@@ -630,7 +630,7 @@ def main():
                 "kalshi_consensus": {"vote": kalshi_vote.upper(), "confidence": round(kalshi_conf * 100, 1)},
             }
             if action == "trading":
-                contracts = 10  # fixed 10 contracts per trade
+                contracts = MAX_CONTRACTS
                 bet_dollars = contracts * entry_price_cents / 100
                 journal.log_decision(
                     ticker=ticker, btc_price=btc or 0, models=models_dict,
@@ -654,7 +654,7 @@ def main():
             # --- Execute trade ---
             if action == "trading" and side:
                 price_cents = entry_price_cents
-                contracts = 10
+                contracts = MAX_CONTRACTS
                 bet_dollars = contracts * price_cents / 100  # actual notional
                 signal_ref = build_signal_ref(decision_mode, calibration.get("version", ""), side, price_bucket)
 
