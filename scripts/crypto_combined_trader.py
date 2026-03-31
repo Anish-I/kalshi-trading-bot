@@ -192,9 +192,9 @@ while True:
                         edge = 0.485 - entry  # empirical P(win) for conjunction
                         if edge > ML_MIN_EDGE:
                             ml_action = "trading"
-                            traded_tickers_ml.add(ticker)
 
                             if args.mode == "sim":
+                                traded_tickers_ml.add(ticker)
                                 log.info(">>> ML SIM: %s %s @%dc x%d | XGB=%s MOM=%s | BTC=$%s",
                                          ml_side.upper(), ticker, entry_cents, ML_MAX_CONTRACTS,
                                          xgb_vote[0].upper(), mom_vote[0].upper(),
@@ -213,6 +213,7 @@ while True:
                                         yes_price=yes_price, no_price=no_price,
                                     )
                                     order_data = resp.get("order", resp)
+                                    traded_tickers_ml.add(ticker)
                                     log.info(">>> ML LIVE: %s %s @%dc x%d | order=%s status=%s",
                                              ml_side.upper(), ticker, entry_cents, ML_MAX_CONTRACTS,
                                              order_data.get("order_id", "?"), order_data.get("status", "?"))
@@ -222,6 +223,7 @@ while True:
                                                 f"order={order_data.get('order_id', '?')}\n")
                                 except Exception:
                                     log.error("ML order failed", exc_info=True)
+                                    continue  # don't count failed orders
 
                             alert_trade_placed(ticker, ml_side, entry_cents, ML_MAX_CONTRACTS,
                                                edge * 100, strategy=f"combined_ml:{args.mode}")
@@ -232,7 +234,7 @@ while True:
         # ============================================================
         pair_action = "no_spread"
 
-        if ticker not in traded_tickers_pair:
+        if ticker not in traded_tickers_pair and ticker not in traded_tickers_ml:
             try:
                 ob = client.get_orderbook(ticker, depth=5)
             except Exception:
