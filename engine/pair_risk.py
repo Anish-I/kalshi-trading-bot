@@ -37,13 +37,12 @@ class PairRiskManager:
         self.orphan_count = 0
         self.orphan_loss_cents = 0
 
-    def can_open_pair(self, pair_cost_cents: int) -> tuple[bool, str]:
-        """Check if we can open a new pair."""
-        if self.exposure_cents + pair_cost_cents > self.budget_cents:
-            return False, f"budget: {self.exposure_cents + pair_cost_cents}c > {self.budget_cents}c"
+    def can_open_pair(self, total_cost_cents: int) -> tuple[bool, str]:
+        """Check if we can open a new pair. total_cost_cents = per_pair_cost * num_contracts."""
+        if self.exposure_cents + total_cost_cents > self.budget_cents:
+            return False, f"budget: {self.exposure_cents + total_cost_cents}c > {self.budget_cents}c"
 
-        if pair_cost_cents > self.pair_cap_cents:
-            return False, f"pair_cap: {pair_cost_cents}c > {self.pair_cap_cents}c"
+        # Don't check per-pair cap here — that's handled by evaluate_pair_opportunity
 
         # Stop if orphan rate is too high
         total = self.completed_count + self.orphan_count

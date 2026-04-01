@@ -380,7 +380,95 @@ while True:
                                     f.write(f"{now.isoformat()} PAIR_SIM {ticker} "
                                             f"YES@{my}c NO@{mn}c cost={mc}c x{pair_size} net={mnet*pair_size:.1f}c\n")
                             else:
-                                # Live: place both limit orders at auto-scaled size
+                                # Live: submit both resting orders, then poll REST for fill/cancel outcome.
+                                def _order_payload(response: dict | None) -> dict:
+                                    if not isinstance(response, dict):
+                                        return {}
+                                    order = response.get("order")
+                                    return order if isinstance(order, dict) else response
+
+                                def _to_int(value: object, fallback: int = 0) -> int:
+                                    if value in (None, ""):
+                                        return fallback
+                                    try:
+                                        return int(value)
+                                    except (TypeError, ValueError):
+                                        try:
+                                            return int(float(str(value)))
+                                        except (TypeError, ValueError):
+                                            return fallback
+
+                                def _fill_count(order: dict) -> int:
+                                    count = _to_int(order.get("fill_count"))
+                                    if count == 0:
+                                        count = _to_int(order.get("fill_count_fp"))
+                                    if count == 0 and str(order.get("status", "")).lower() == "executed":
+                                        return pair_size
+                                    return count
+
+                                def _remaining_count(order: dict) -> int:
+                                    if "remaining_count" in order or "remaining_count_fp" in order:
+                                        remaining = _to_int(order.get("remaining_count"))
+                                        if remaining == 0:
+                                            remaining = _to_int(order.get("remaining_count_fp"))
+                                        return remaining
+                                    return max(pair_size - _fill_count(order), 0)
+
+                                def _is_filled(order: dict) -> bool:
+                                    status = str(order.get("status", "")).lower()
+                                    if status == "executed":
+                                        return True
+                                    fill_count = _fill_count(order)
+                                    remaining_count = _remaining_count(order)
+                                    return fill_count >= pair_size or (fill_count > 0 and remaining_count == 0)
+
+                                def _order_price(order: dict, side: str, fallback: int) -> int:
+                                    price_key = "yes_price" if side == "yes" else "no_price"
+                                    return _to_int(order.get(price_key), fallback)
+
+                                def _sync_leg(order: dict, side: str, fallback: int) -> None:
+                                    if not _is_filled(order):
+                                        return
+                                    status = str(order.get("status", "")).lower()
+                                    qty = _fill_count(order)
+                                    if qty == 0 and status == "executed":
+                                        qty = pair_size
+                                    qty = max(qty, 1)
+                                    price = _order_price(order, side, fallback)
+                                    if side == "yes":
+                                        pair.record_yes_fill(price, qty)
+                                    else:
+                                        pair.record_no_fill(price, qty)
+
+                                def _complete_live_pair() -> None:
+                                    completed = pair_tracker.complete_pair(ticker)
+                                    if completed is None:
+                                        return
+                                    pair_risk.record_pair_complete(mc * pair_size)
+                                    record_series_complete(series)
+                                    completed_at = datetime.now(timezone.utc).isoformat()
+                                    log.info(
+                                        ">>> PAIR LIVE COMPLETE: %s [%s] YES@%dc NO@%dc = %dc x%d, +%.1fc net",
+                                        ticker,
+                                        series,
+                                        completed.yes_filled_price or my,
+                                        completed.no_filled_price or mn,
+                                        completed.pair_cost_cents,
+                                        pair_size,
+                                        mnet * pair_size,
+                                    )
+                                    with open(TRADE_LOG, "a") as f:
+                                        f.write(
+                                            f"{completed_at} PAIR_LIVE_COMPLETE {ticker} "
+                                            f"YES@{completed.yes_filled_price or my}c "
+                                            f"NO@{completed.no_filled_price or mn}c "
+                                            f"cost={completed.pair_cost_cents}c x{pair_size} "
+                                            f"net={mnet*pair_size:.1f}c "
+                                            f"yes_order={yes_order_id} no_order={no_order_id}\n"
+                                        )
+
+                                yes_resp = None
+                                no_resp = None
                                 try:
                                     yes_resp = client.place_order(
                                         ticker=ticker, side="yes", action="buy",
@@ -390,17 +478,152 @@ while True:
                                         ticker=ticker, side="no", action="buy",
                                         count=pair_size, order_type="limit", no_price=mn,
                                     )
-                                    pair_risk.record_entry(mc * pair_size)
-                                    pair_risk.record_pair_complete(mc * pair_size)
-                                    record_series_complete(series)
-                                    log.info(">>> PAIR LIVE: %s YES@%dc NO@%dc x%d | orders placed",
-                                             ticker, my, mn, pair_size)
-                                    with open(TRADE_LOG, "a") as f:
-                                        f.write(f"{now.isoformat()} PAIR_LIVE {ticker} "
-                                                f"YES@{my}c NO@{mn}c cost={mc}c x{pair_size} "
-                                                f"net={mnet*pair_size:.1f}c\n")
                                 except Exception:
+                                    yes_order = _order_payload(yes_resp)
+                                    yes_order_id = str(yes_order.get("order_id", "") or "")
+                                    if yes_order_id:
+                                        try:
+                                            client.cancel_order(yes_order_id)
+                                        except Exception:
+                                            log.warning("Failed canceling submitted YES leg for %s", ticker, exc_info=True)
+                                    traded_tickers_pair.discard(ticker)
                                     log.error("Pair order failed", exc_info=True)
+                                    continue
+
+                                yes_order = _order_payload(yes_resp)
+                                no_order = _order_payload(no_resp)
+                                yes_order_id = str(yes_order.get("order_id", "") or "")
+                                no_order_id = str(no_order.get("order_id", "") or "")
+
+                                if not yes_order_id or not no_order_id:
+                                    for order_id, side_name in ((yes_order_id, "YES"), (no_order_id, "NO")):
+                                        if not order_id:
+                                            continue
+                                        try:
+                                            client.cancel_order(order_id)
+                                        except Exception:
+                                            log.warning("Failed canceling %s leg for %s after missing order id",
+                                                        side_name, ticker, exc_info=True)
+                                    traded_tickers_pair.discard(ticker)
+                                    log.error("Pair order missing order ids: yes=%s no=%s", yes_order_id or "?", no_order_id or "?")
+                                    continue
+
+                                pair = pair_tracker.start_pair(ticker, my, mn, market.get("close_time", ""))
+                                pair.yes_order_id = yes_order_id
+                                pair.no_order_id = no_order_id
+                                pair_risk.record_entry(mc * pair_size)
+
+                                log.info(">>> PAIR LIVE: %s [%s] YES@%dc NO@%dc x%d | submitted yes=%s no=%s",
+                                         ticker, series, my, mn, pair_size, yes_order_id, no_order_id)
+
+                                poll_deadline = time.monotonic() + 30.0
+                                pair_completed = False
+
+                                while time.monotonic() < poll_deadline:
+                                    try:
+                                        yes_order = client.get_order(yes_order_id)
+                                        no_order = client.get_order(no_order_id)
+                                    except Exception:
+                                        log.warning("Pair order poll failed for %s", ticker, exc_info=True)
+                                        time.sleep(1)
+                                        continue
+
+                                    if not pair.yes_filled:
+                                        _sync_leg(yes_order, "yes", my)
+                                    if not pair.no_filled:
+                                        _sync_leg(no_order, "no", mn)
+
+                                    if pair.yes_filled and pair.no_filled:
+                                        _complete_live_pair()
+                                        pair_completed = True
+                                        break
+
+                                    time.sleep(1)
+
+                                if not pair_completed:
+                                    try:
+                                        yes_order = client.get_order(yes_order_id)
+                                        no_order = client.get_order(no_order_id)
+                                        if not pair.yes_filled:
+                                            _sync_leg(yes_order, "yes", my)
+                                        if not pair.no_filled:
+                                            _sync_leg(no_order, "no", mn)
+                                    except Exception:
+                                        log.warning("Final pair order poll failed for %s", ticker, exc_info=True)
+
+                                if not pair_completed and pair.yes_filled and pair.no_filled:
+                                    _complete_live_pair()
+                                    pair_completed = True
+
+                                if not pair_completed and pair.is_orphan:
+                                    unfilled_side = "no" if pair.yes_filled else "yes"
+                                    unfilled_order_id = no_order_id if unfilled_side == "no" else yes_order_id
+                                    unfilled_price = mn if unfilled_side == "no" else my
+
+                                    try:
+                                        client.cancel_order(unfilled_order_id)
+                                    except Exception:
+                                        log.warning("Failed canceling %s orphan leg for %s",
+                                                    unfilled_side.upper(), ticker, exc_info=True)
+
+                                    try:
+                                        latest_unfilled = client.get_order(unfilled_order_id)
+                                        _sync_leg(latest_unfilled, unfilled_side, unfilled_price)
+                                    except Exception:
+                                        log.warning("Failed refreshing %s leg after cancel for %s",
+                                                    unfilled_side.upper(), ticker, exc_info=True)
+
+                                    if pair.yes_filled and pair.no_filled:
+                                        _complete_live_pair()
+                                        pair_completed = True
+                                    else:
+                                        resolved = pair_tracker.resolve_orphan(ticker, "timeout")
+                                        if resolved is not None:
+                                            loss_cents = 0
+                                            if resolved.yes_filled:
+                                                loss_cents = resolved.yes_filled_price * max(resolved.yes_qty, 1)
+                                            elif resolved.no_filled:
+                                                loss_cents = resolved.no_filled_price * max(resolved.no_qty, 1)
+                                            pair_risk.record_orphan(loss_cents)
+                                            pair_risk.exposure_cents = max(0, pair_risk.exposure_cents - (mc * pair_size))
+                                            record_series_orphan(series)
+                                            orphaned_at = datetime.now(timezone.utc).isoformat()
+                                            log.warning(
+                                                ">>> PAIR LIVE ORPHAN: %s [%s] filled=%s canceled=%s loss<=%dc",
+                                                ticker,
+                                                series,
+                                                "YES" if resolved.yes_filled else "NO",
+                                                unfilled_side.upper(),
+                                                loss_cents,
+                                            )
+                                            with open(TRADE_LOG, "a") as f:
+                                                f.write(
+                                                    f"{orphaned_at} PAIR_LIVE_ORPHAN {ticker} "
+                                                    f"filled={'YES' if resolved.yes_filled else 'NO'} "
+                                                    f"canceled={unfilled_side.upper()} "
+                                                    f"loss<={loss_cents}c x{pair_size} "
+                                                    f"yes_order={yes_order_id} no_order={no_order_id}\n"
+                                                )
+
+                                if not pair_completed and not pair.yes_filled and not pair.no_filled:
+                                    for order_id, side_name in ((yes_order_id, "YES"), (no_order_id, "NO")):
+                                        try:
+                                            client.cancel_order(order_id)
+                                        except Exception:
+                                            log.warning("Failed canceling stale %s leg for %s",
+                                                        side_name, ticker, exc_info=True)
+                                    pair.transition("resolved", "timeout_no_fill")
+                                    pair_tracker.complete_pair(ticker)
+                                    pair_risk.exposure_cents = max(0, pair_risk.exposure_cents - (mc * pair_size))
+                                    timed_out_at = datetime.now(timezone.utc).isoformat()
+                                    log.info(">>> PAIR LIVE TIMEOUT: %s [%s] no fills in 30s, canceled both legs",
+                                             ticker, series)
+                                    with open(TRADE_LOG, "a") as f:
+                                        f.write(
+                                            f"{timed_out_at} PAIR_LIVE_TIMEOUT {ticker} "
+                                            f"YES@{my}c NO@{mn}c cost={mc}c x{pair_size} "
+                                            f"reason=no_fill_30s yes_order={yes_order_id} no_order={no_order_id}\n"
+                                        )
 
                             alert_trade_placed(ticker, "PAIR", mc * pair_size, pair_size, mnet * pair_size,
                                                strategy=f"combined_pair:{args.mode}")
