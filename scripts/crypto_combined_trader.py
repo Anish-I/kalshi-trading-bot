@@ -300,10 +300,13 @@ while True:
                         _recent_spreads.pop(0)
 
                 current_cap = elastic_pair_cap()
+                pair_risk.pair_cap_cents = current_cap  # sync elastic cap to risk manager (Codex fix #3)
                 opp = evaluate_pair_opportunity(ob, pair_cap_cents=current_cap)
 
                 if opp["maker_tradeable"]:
-                    can_open, reason = pair_risk.can_open_pair(opp["maker_pair_cost"])
+                    # Check budget with scaled size (Codex fix #2)
+                    pair_size_check = auto_pair_size(pair_risk.completed_count, pair_risk.orphan_count)
+                    can_open, reason = pair_risk.can_open_pair(opp["maker_pair_cost"] * pair_size_check)
                     if can_open:
                         my = opp["maker_yes_price"]
                         mn = opp["maker_no_price"]
@@ -339,15 +342,19 @@ while True:
                                     ticker=ticker, side="no", action="buy",
                                     count=pair_size, order_type="limit", no_price=mn,
                                 )
+                                # Track completion for auto-scaling (Codex fix #1)
+                                pair_risk.record_entry(mc * pair_size)
+                                pair_risk.record_pair_complete(mc * pair_size)
                                 log.info(">>> PAIR LIVE: %s YES@%dc NO@%dc x%d | orders placed",
                                          ticker, my, mn, pair_size)
                                 with open(TRADE_LOG, "a") as f:
                                     f.write(f"{now.isoformat()} PAIR_LIVE {ticker} "
-                                            f"YES@{my}c NO@{mn}c cost={mc}c\n")
+                                            f"YES@{my}c NO@{mn}c cost={mc}c x{pair_size} "
+                                            f"net={mnet*pair_size:.1f}c\n")
                             except Exception:
                                 log.error("Pair order failed", exc_info=True)
 
-                        alert_trade_placed(ticker, "PAIR", mc, 1, mnet,
+                        alert_trade_placed(ticker, "PAIR", mc * pair_size, pair_size, mnet * pair_size,
                                            strategy=f"combined_pair:{args.mode}")
                         pair_trades += 1
 
