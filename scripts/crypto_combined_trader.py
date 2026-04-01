@@ -63,6 +63,35 @@ ML_MAX_ENTRY_PRICE = 0.45
 ML_MIN_EDGE = 0.03
 PAIR_MIN_NET = 0.5  # minimum 0.5c net profit for pair (more aggressive)
 SCAN_INTERVAL = 15  # scan every 15s to catch spread windows faster
+
+# Elastic pair cap: adjusts based on recent spread history
+PAIR_CAP_FLOOR = 95   # tightest cap (most selective)
+PAIR_CAP_CEILING = 99  # loosest cap (most aggressive)
+PAIR_CAP_WINDOW = 20   # number of recent spreads to track
+_recent_spreads: list[int] = []
+
+
+def elastic_pair_cap() -> int:
+    """Adjust pair cap based on recent spread conditions.
+
+    When spreads are consistently wide → lower cap (be aggressive, capture more)
+    When spreads are tight → raise cap (be selective, only take best)
+    When no data → use default from args
+    """
+    if len(_recent_spreads) < 5:
+        return args.pair_cap  # not enough data yet
+
+    avg_spread = sum(_recent_spreads) / len(_recent_spreads)
+
+    # Wide spreads (avg > 6c): lower cap to catch more
+    if avg_spread > 6:
+        return PAIR_CAP_FLOOR  # 95c cap = 5c gross minimum
+    # Medium spreads (3-6c): moderate cap
+    elif avg_spread > 3:
+        return 97  # 3c gross minimum
+    # Tight spreads (< 3c): raise cap to only take the best
+    else:
+        return PAIR_CAP_CEILING  # 99c = almost anything profitable
 DAILY_LOSS_LIMIT = 500  # 5 dollars
 
 STATE_FILE = Path(settings.DATA_DIR) / "combined_trader_state.json"
@@ -78,7 +107,7 @@ log.info("=" * 60)
 client = KalshiClient()
 tracker = KXBTCMarketTracker(client)
 pair_tracker = PairTracker()
-pair_risk = PairRiskManager(pair_cap_cents=args.pair_cap, budget_cents=1500)
+pair_risk = PairRiskManager(pair_cap_cents=args.pair_cap, budget_cents=3000)
 
 # Load ML models
 xgb_model = XGBoostModel(str(MODEL_PATH))
@@ -242,7 +271,16 @@ while True:
                 ob = {}
 
             if ob:
-                opp = evaluate_pair_opportunity(ob, pair_cap_cents=args.pair_cap)
+                # Track spread for elastic cap
+                from engine.pair_pricing import extract_book_from_orderbook
+                book = extract_book_from_orderbook(ob)
+                if book["spread_cents"] > 0:
+                    _recent_spreads.append(book["spread_cents"])
+                    if len(_recent_spreads) > PAIR_CAP_WINDOW:
+                        _recent_spreads.pop(0)
+
+                current_cap = elastic_pair_cap()
+                opp = evaluate_pair_opportunity(ob, pair_cap_cents=current_cap)
 
                 if opp["maker_tradeable"]:
                     can_open, reason = pair_risk.can_open_pair(opp["maker_pair_cost"])
@@ -272,11 +310,11 @@ while True:
                             try:
                                 yes_resp = client.place_order(
                                     ticker=ticker, side="yes", action="buy",
-                                    count=1, order_type="limit", yes_price=my,
+                                    count=3, order_type="limit", yes_price=my,
                                 )
                                 no_resp = client.place_order(
                                     ticker=ticker, side="no", action="buy",
-                                    count=1, order_type="limit", no_price=mn,
+                                    count=3, order_type="limit", no_price=mn,
                                 )
                                 log.info(">>> PAIR LIVE: %s YES@%dc NO@%dc | orders placed",
                                          ticker, my, mn)
@@ -308,6 +346,9 @@ while True:
                 "daily_pnl": daily_pnl,
                 "pair_stats": pair_tracker.get_stats(),
                 "pair_risk": pair_risk.summary(),
+                "elastic_cap": elastic_pair_cap(),
+                "avg_spread": round(sum(_recent_spreads) / len(_recent_spreads), 1) if _recent_spreads else 0,
+                "spread_samples": len(_recent_spreads),
             }
             try:
                 STATE_FILE.write_text(json.dumps(state, indent=2, default=str))
