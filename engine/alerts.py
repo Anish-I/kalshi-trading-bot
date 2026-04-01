@@ -20,8 +20,33 @@ WARNING = "WARNING"
 CRITICAL = "CRITICAL"
 
 
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8730705383:AAHoqKnc_hAxGWlP4QvJQrnpW5ZjBq76R4g")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "5006911570")
+
+
+def _send_telegram(text: str) -> None:
+    """Best-effort Telegram notification via Bot API. Never blocks or raises."""
+    try:
+        import threading
+
+        def _send():
+            try:
+                import httpx
+                httpx.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+                    timeout=5.0,
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_send, daemon=True).start()
+    except Exception:
+        pass
+
+
 def alert(severity: str, category: str, message: str, **extra) -> None:
-    """Write an alert to log file. Non-blocking, never raises."""
+    """Write an alert to log file + send Telegram. Non-blocking, never raises."""
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     extra_str = " ".join(f"{k}={v}" for k, v in extra.items()) if extra else ""
     line = f"[{ts}] [{severity}] [{category}] {message} {extra_str}".rstrip()
@@ -36,6 +61,10 @@ def alert(severity: str, category: str, message: str, **extra) -> None:
     # Log to Python logger too
     log_level = {"INFO": logging.INFO, "WARNING": logging.WARNING, "CRITICAL": logging.ERROR}
     logger.log(log_level.get(severity, logging.INFO), "ALERT: %s", line)
+
+    # Telegram for trades and critical alerts only
+    if category in ("TRADE_PLACED", "SETTLEMENT", "RISK_HALT", "BALANCE_LOW"):
+        _send_telegram(f"🔔 {category}\n{message}")
 
 
 # --- Convenience functions ---
