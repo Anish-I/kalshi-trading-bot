@@ -117,14 +117,16 @@ STATE_FILE = Path(settings.DATA_DIR) / "combined_trader_state.json"
 TRADE_LOG = Path(settings.DATA_DIR) / "logs" / "combined_trades.log"
 TRADE_LOG.parent.mkdir(parents=True, exist_ok=True)
 
+CRYPTO_SERIES = ["KXBTC15M", "KXETH15M"]
+
 log.info("=" * 60)
 log.info("  CRYPTO COMBINED TRADER — %s mode", args.mode.upper())
-log.info("  ML: conjunction only, %d contracts max", ML_MAX_CONTRACTS)
-log.info("  Pair: maker at %dc cap, 1 contract", args.pair_cap)
+log.info("  Series: %s", ", ".join(CRYPTO_SERIES))
+log.info("  ML: conjunction only, %d contracts max (research)", ML_MAX_CONTRACTS)
+log.info("  Pair: elastic cap, auto-scale, 24/7")
 log.info("=" * 60)
 
 client = KalshiClient()
-tracker = KXBTCMarketTracker(client)
 pair_tracker = PairTracker()
 pair_risk = PairRiskManager(pair_cap_cents=args.pair_cap, budget_cents=3000)
 
@@ -178,18 +180,34 @@ while True:
         scan_count += 1
         now = datetime.now(timezone.utc)
 
-        market = tracker.get_next_market()
-        if not market:
+        # Scan ALL crypto series for pair opportunities
+        all_markets = []
+        for series in CRYPTO_SERIES:
+            try:
+                data = client._request("GET", "/markets",
+                                       params={"series_ticker": series, "status": "open", "limit": 5})
+                for m in data.get("markets", []):
+                    close_time = m.get("close_time", "")
+                    if close_time:
+                        m["_series"] = series
+                        all_markets.append(m)
+            except Exception:
+                pass
+
+        if not all_markets:
             time.sleep(SCAN_INTERVAL)
             continue
 
-        ticker = market["ticker"]
-        remaining = tracker.get_market_time_remaining(market)
+        # Process EACH market for pair opportunities
+        from kalshi.market_discovery import KXBTCMarketTracker
+        _tracker = KXBTCMarketTracker(client)
 
-        # Pair runs 24/7, ML only during valid windows
-        if remaining < 60:
-            time.sleep(SCAN_INTERVAL)
-            continue
+        for market in all_markets:
+            ticker = market["ticker"]
+            remaining = _tracker.get_market_time_remaining(market)
+
+            if remaining < 60:
+                continue
 
         if daily_pnl <= -DAILY_LOSS_LIMIT:
             if scan_count % 20 == 0:
