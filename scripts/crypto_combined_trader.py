@@ -84,33 +84,52 @@ def auto_pair_size(completed: int, orphans: int) -> int:
     return 3
 
 # Elastic pair cap: adjusts based on recent spread history
-PAIR_CAP_FLOOR = 95   # tightest cap (most selective)
-PAIR_CAP_CEILING = 99  # loosest cap (most aggressive)
-PAIR_CAP_WINDOW = 20   # number of recent spreads to track
-_recent_spreads: list[int] = []
+PAIR_CAP_FLOOR = 95
+PAIR_CAP_CEILING = 99
+PAIR_CAP_WINDOW = 20
+
+# Per-series elastic state
+_series_spreads: dict[str, list[int]] = {}
+_series_completed: dict[str, int] = {}
+_series_orphans: dict[str, int] = {}
 
 
-def elastic_pair_cap() -> int:
-    """Adjust pair cap based on recent spread conditions.
+def elastic_pair_cap(series: str) -> int:
+    """Per-series elastic cap based on that series' spread history."""
+    spreads = _series_spreads.get(series, [])
+    if len(spreads) < 5:
+        return args.pair_cap
 
-    When spreads are consistently wide → lower cap (be aggressive, capture more)
-    When spreads are tight → raise cap (be selective, only take best)
-    When no data → use default from args
-    """
-    if len(_recent_spreads) < 5:
-        return args.pair_cap  # not enough data yet
-
-    avg_spread = sum(_recent_spreads) / len(_recent_spreads)
-
-    # Wide spreads (avg > 6c): lower cap to catch more
-    if avg_spread > 6:
-        return PAIR_CAP_FLOOR  # 95c cap = 5c gross minimum
-    # Medium spreads (3-6c): moderate cap
-    elif avg_spread > 3:
-        return 97  # 3c gross minimum
-    # Tight spreads (< 3c): raise cap to only take the best
+    avg = sum(spreads) / len(spreads)
+    if avg > 6:
+        return PAIR_CAP_FLOOR
+    elif avg > 3:
+        return 97
     else:
-        return PAIR_CAP_CEILING  # 99c = almost anything profitable
+        return PAIR_CAP_CEILING
+
+
+def track_series_spread(series: str, spread: int) -> None:
+    if series not in _series_spreads:
+        _series_spreads[series] = []
+    _series_spreads[series].append(spread)
+    if len(_series_spreads[series]) > PAIR_CAP_WINDOW:
+        _series_spreads[series].pop(0)
+
+
+def series_pair_size(series: str) -> int:
+    """Per-series auto-scaling based on that series' track record."""
+    completed = _series_completed.get(series, 0)
+    orphans = _series_orphans.get(series, 0)
+    return auto_pair_size(completed, orphans)
+
+
+def record_series_complete(series: str) -> None:
+    _series_completed[series] = _series_completed.get(series, 0) + 1
+
+
+def record_series_orphan(series: str) -> None:
+    _series_orphans[series] = _series_orphans.get(series, 0) + 1
 DAILY_LOSS_LIMIT = 500  # 5 dollars
 
 STATE_FILE = Path(settings.DATA_DIR) / "combined_trader_state.json"
@@ -202,13 +221,6 @@ while True:
         from kalshi.market_discovery import KXBTCMarketTracker
         _tracker = KXBTCMarketTracker(client)
 
-        for market in all_markets:
-            ticker = market["ticker"]
-            remaining = _tracker.get_market_time_remaining(market)
-
-            if remaining < 60:
-                continue
-
         if daily_pnl <= -DAILY_LOSS_LIMIT:
             if scan_count % 20 == 0:
                 log.info("Daily loss limit hit: %+dc", daily_pnl)
@@ -216,188 +228,216 @@ while True:
             continue
 
         btc = get_btc_price()
+        last_ticker = None
+        last_remaining = 0
+        last_ml_action = "no_signal"
+        last_pair_action = "no_spread"
+        should_write_state = scan_count % 10 == 0
 
-        # ============================================================
-        # STRATEGY 1: ML CONJUNCTION (research/log only — no live orders)
-        # ============================================================
-        ml_action = "no_signal"
-        ml_side = None
+        for market in all_markets:
+            ticker = market["ticker"]
+            remaining = _tracker.get_market_time_remaining(market)
+            series = market.get("_series", "")
+            ml_action = "no_signal"
+            pair_action = "no_spread"
 
-        if ticker not in traded_tickers_ml and remaining > 120:
-            features_df = load_latest_features()
-            if features_df is not None:
-                xgb_vote, xgb_conf = xgb_model.score(features_df)
-                last_row = features_df.iloc[-1].to_dict()
-                mom_vote, mom_conf = momentum_model.score(last_row)
+            last_ticker = ticker
+            last_remaining = int(remaining)
+            last_ml_action = ml_action
+            last_pair_action = pair_action
 
-                if xgb_vote == mom_vote and xgb_vote != "flat":
-                    direction = xgb_vote
-                    yes_ask = float(market.get("yes_ask_dollars", 0) or 0)
-                    no_ask = float(market.get("no_ask_dollars", 0) or 0)
+            if remaining < 60:
+                last_ml_action = "skipped_short_window"
+                last_pair_action = "skipped_short_window"
+                continue
 
-                    # Get real prices from orderbook
-                    try:
-                        ob = client.get_orderbook(ticker, depth=3)
-                        fp = ob.get("orderbook_fp", {})
-                        yb = fp.get("yes_dollars", [])
-                        nb = fp.get("no_dollars", [])
-                        if yb:
-                            yes_ask = 1.0 - float(nb[-1][0]) if nb else 0
-                            no_ask = 1.0 - float(yb[-1][0]) if yb else 0
-                    except Exception:
-                        pass
+            # ============================================================
+            # STRATEGY 1: ML CONJUNCTION (research/log only, BTC only)
+            # ============================================================
+            ml_side = None
 
-                    if direction == "up" and 0 < yes_ask <= ML_MAX_ENTRY_PRICE:
-                        ml_side = "yes"
-                        entry = yes_ask
-                    elif direction == "down" and 0 < no_ask <= ML_MAX_ENTRY_PRICE:
-                        ml_side = "no"
-                        entry = no_ask
+            if series == "KXBTC15M" and ticker not in traded_tickers_ml and remaining > 120:
+                features_df = load_latest_features()
+                if features_df is not None:
+                    xgb_vote, xgb_conf = xgb_model.score(features_df)
+                    last_row = features_df.iloc[-1].to_dict()
+                    mom_vote, mom_conf = momentum_model.score(last_row)
 
-                    if ml_side:
-                        entry_cents = int(round(entry * 100))
-                        edge = 0.485 - entry  # empirical P(win) for conjunction
-                        if edge > ML_MIN_EDGE:
-                            ml_action = "trading"
+                    if xgb_vote == mom_vote and xgb_vote != "flat":
+                        direction = xgb_vote
+                        yes_ask = float(market.get("yes_ask_dollars", 0) or 0)
+                        no_ask = float(market.get("no_ask_dollars", 0) or 0)
 
-                            # ML always runs in SIM (research only, no live orders)
-                            if True:
-                                traded_tickers_ml.add(ticker)
-                                log.info(">>> ML SIM: %s %s @%dc x%d | XGB=%s MOM=%s | BTC=$%s",
-                                         ml_side.upper(), ticker, entry_cents, ML_MAX_CONTRACTS,
-                                         xgb_vote[0].upper(), mom_vote[0].upper(),
-                                         f"{btc:,.0f}" if btc else "?")
-                                with open(TRADE_LOG, "a") as f:
-                                    f.write(f"{now.isoformat()} ML_SIM {ml_side.upper()} {ticker} "
-                                            f"@{entry_cents}c x{ML_MAX_CONTRACTS} "
-                                            f"XGB={xgb_vote[0].upper()} MOM={mom_vote[0].upper()}\n")
-                            else:
-                                try:
-                                    yes_price = entry_cents if ml_side == "yes" else None
-                                    no_price = entry_cents if ml_side == "no" else None
-                                    resp = client.place_order(
-                                        ticker=ticker, side=ml_side, action="buy",
-                                        count=ML_MAX_CONTRACTS, order_type="limit",
-                                        yes_price=yes_price, no_price=no_price,
-                                    )
-                                    order_data = resp.get("order", resp)
+                        # Get real prices from orderbook
+                        try:
+                            ob = client.get_orderbook(ticker, depth=3)
+                            fp = ob.get("orderbook_fp", {})
+                            yb = fp.get("yes_dollars", [])
+                            nb = fp.get("no_dollars", [])
+                            if yb:
+                                yes_ask = 1.0 - float(nb[-1][0]) if nb else 0
+                                no_ask = 1.0 - float(yb[-1][0]) if yb else 0
+                        except Exception:
+                            pass
+
+                        if direction == "up" and 0 < yes_ask <= ML_MAX_ENTRY_PRICE:
+                            ml_side = "yes"
+                            entry = yes_ask
+                        elif direction == "down" and 0 < no_ask <= ML_MAX_ENTRY_PRICE:
+                            ml_side = "no"
+                            entry = no_ask
+
+                        if ml_side:
+                            entry_cents = int(round(entry * 100))
+                            edge = 0.485 - entry  # empirical P(win) for conjunction
+                            if edge > ML_MIN_EDGE:
+                                ml_action = "trading"
+
+                                # ML always runs in SIM (research only, no live orders)
+                                if True:
                                     traded_tickers_ml.add(ticker)
-                                    log.info(">>> ML LIVE: %s %s @%dc x%d | order=%s status=%s",
+                                    log.info(">>> ML SIM: %s %s @%dc x%d | XGB=%s MOM=%s | BTC=$%s",
                                              ml_side.upper(), ticker, entry_cents, ML_MAX_CONTRACTS,
-                                             order_data.get("order_id", "?"), order_data.get("status", "?"))
+                                             xgb_vote[0].upper(), mom_vote[0].upper(),
+                                             f"{btc:,.0f}" if btc else "?")
                                     with open(TRADE_LOG, "a") as f:
-                                        f.write(f"{now.isoformat()} ML_LIVE {ml_side.upper()} {ticker} "
+                                        f.write(f"{now.isoformat()} ML_SIM {ml_side.upper()} {ticker} "
                                                 f"@{entry_cents}c x{ML_MAX_CONTRACTS} "
-                                                f"order={order_data.get('order_id', '?')}\n")
-                                except Exception:
-                                    log.error("ML order failed", exc_info=True)
-                                    continue  # don't count failed orders
+                                                f"XGB={xgb_vote[0].upper()} MOM={mom_vote[0].upper()}\n")
+                                else:
+                                    try:
+                                        yes_price = entry_cents if ml_side == "yes" else None
+                                        no_price = entry_cents if ml_side == "no" else None
+                                        resp = client.place_order(
+                                            ticker=ticker, side=ml_side, action="buy",
+                                            count=ML_MAX_CONTRACTS, order_type="limit",
+                                            yes_price=yes_price, no_price=no_price,
+                                        )
+                                        order_data = resp.get("order", resp)
+                                        traded_tickers_ml.add(ticker)
+                                        log.info(">>> ML LIVE: %s %s @%dc x%d | order=%s status=%s",
+                                                 ml_side.upper(), ticker, entry_cents, ML_MAX_CONTRACTS,
+                                                 order_data.get("order_id", "?"), order_data.get("status", "?"))
+                                        with open(TRADE_LOG, "a") as f:
+                                            f.write(f"{now.isoformat()} ML_LIVE {ml_side.upper()} {ticker} "
+                                                    f"@{entry_cents}c x{ML_MAX_CONTRACTS} "
+                                                    f"order={order_data.get('order_id', '?')}\n")
+                                    except Exception:
+                                        log.error("ML order failed", exc_info=True)
+                                        continue  # don't count failed orders
 
-                            alert_trade_placed(ticker, ml_side, entry_cents, ML_MAX_CONTRACTS,
-                                               edge * 100, strategy=f"combined_ml:{args.mode}")
-                            ml_trades += 1
+                                alert_trade_placed(ticker, ml_side, entry_cents, ML_MAX_CONTRACTS,
+                                                   edge * 100, strategy=f"combined_ml:{args.mode}")
+                                ml_trades += 1
 
-        # ============================================================
-        # STRATEGY 2: PAIR MAKER
-        # ============================================================
-        pair_action = "no_spread"
+            # ============================================================
+            # STRATEGY 2: PAIR MAKER
+            # ============================================================
+            if ticker not in traded_tickers_pair and ticker not in traded_tickers_ml:
+                try:
+                    ob = client.get_orderbook(ticker, depth=5)
+                except Exception:
+                    ob = {}
 
-        if ticker not in traded_tickers_pair and ticker not in traded_tickers_ml:
-            try:
-                ob = client.get_orderbook(ticker, depth=5)
-            except Exception:
-                ob = {}
+                if ob:
+                    # Track spread per-series for elastic cap
+                    from engine.pair_pricing import extract_book_from_orderbook
+                    book = extract_book_from_orderbook(ob)
+                    if book["spread_cents"] > 0:
+                        track_series_spread(series, book["spread_cents"])
 
-            if ob:
-                # Track spread for elastic cap
-                from engine.pair_pricing import extract_book_from_orderbook
-                book = extract_book_from_orderbook(ob)
-                if book["spread_cents"] > 0:
-                    _recent_spreads.append(book["spread_cents"])
-                    if len(_recent_spreads) > PAIR_CAP_WINDOW:
-                        _recent_spreads.pop(0)
+                    current_cap = elastic_pair_cap(series)
+                    pair_risk.pair_cap_cents = current_cap
+                    opp = evaluate_pair_opportunity(ob, pair_cap_cents=current_cap)
 
-                current_cap = elastic_pair_cap()
-                pair_risk.pair_cap_cents = current_cap  # sync elastic cap to risk manager (Codex fix #3)
-                opp = evaluate_pair_opportunity(ob, pair_cap_cents=current_cap)
+                    if opp["maker_tradeable"]:
+                        # Check budget with per-series scaled size
+                        pair_size_check = series_pair_size(series)
+                        can_open, reason = pair_risk.can_open_pair(opp["maker_pair_cost"] * pair_size_check)
+                        if can_open:
+                            my = opp["maker_yes_price"]
+                            mn = opp["maker_no_price"]
+                            mc = opp["maker_pair_cost"]
+                            mnet = opp["maker_net"]
+                            traded_tickers_pair.add(ticker)
+                            pair_action = "trading"
 
-                if opp["maker_tradeable"]:
-                    # Check budget with scaled size (Codex fix #2)
-                    pair_size_check = auto_pair_size(pair_risk.completed_count, pair_risk.orphan_count)
-                    can_open, reason = pair_risk.can_open_pair(opp["maker_pair_cost"] * pair_size_check)
-                    if can_open:
-                        my = opp["maker_yes_price"]
-                        mn = opp["maker_no_price"]
-                        mc = opp["maker_pair_cost"]
-                        mnet = opp["maker_net"]
-                        traded_tickers_pair.add(ticker)
-                        pair_action = "trading"
+                            # Auto-scale per-series
+                            pair_size = series_pair_size(series)
 
-                        # Auto-scale pair size based on track record
-                        pair_size = auto_pair_size(pair_risk.completed_count, pair_risk.orphan_count)
-
-                        if args.mode == "sim":
-                            pair = pair_tracker.start_pair(ticker, my, mn)
-                            pair.record_yes_fill(my, pair_size)
-                            pair.record_no_fill(mn, pair_size)
-                            pair_tracker.complete_pair(ticker)
-                            pair_risk.record_entry(mc * pair_size)
-                            pair_risk.record_pair_complete(mc * pair_size)
-
-                            log.info(">>> PAIR SIM: %s YES@%dc NO@%dc = %dc x%d, +%.1fc net [spread %dc]",
-                                     ticker, my, mn, mc, pair_size, mnet * pair_size, opp["spread_cents"])
-                            with open(TRADE_LOG, "a") as f:
-                                f.write(f"{now.isoformat()} PAIR_SIM {ticker} "
-                                        f"YES@{my}c NO@{mn}c cost={mc}c x{pair_size} net={mnet*pair_size:.1f}c\n")
-                        else:
-                            # Live: place both limit orders at auto-scaled size
-                            try:
-                                yes_resp = client.place_order(
-                                    ticker=ticker, side="yes", action="buy",
-                                    count=pair_size, order_type="limit", yes_price=my,
-                                )
-                                no_resp = client.place_order(
-                                    ticker=ticker, side="no", action="buy",
-                                    count=pair_size, order_type="limit", no_price=mn,
-                                )
-                                # Track completion for auto-scaling (Codex fix #1)
+                            if args.mode == "sim":
+                                pair = pair_tracker.start_pair(ticker, my, mn)
+                                pair.record_yes_fill(my, pair_size)
+                                pair.record_no_fill(mn, pair_size)
+                                pair_tracker.complete_pair(ticker)
                                 pair_risk.record_entry(mc * pair_size)
                                 pair_risk.record_pair_complete(mc * pair_size)
-                                log.info(">>> PAIR LIVE: %s YES@%dc NO@%dc x%d | orders placed",
-                                         ticker, my, mn, pair_size)
-                                with open(TRADE_LOG, "a") as f:
-                                    f.write(f"{now.isoformat()} PAIR_LIVE {ticker} "
-                                            f"YES@{my}c NO@{mn}c cost={mc}c x{pair_size} "
-                                            f"net={mnet*pair_size:.1f}c\n")
-                            except Exception:
-                                log.error("Pair order failed", exc_info=True)
+                                record_series_complete(series)
 
-                        alert_trade_placed(ticker, "PAIR", mc * pair_size, pair_size, mnet * pair_size,
-                                           strategy=f"combined_pair:{args.mode}")
-                        pair_trades += 1
+                                log.info(">>> PAIR SIM: %s [%s] YES@%dc NO@%dc = %dc x%d, +%.1fc net [spread %dc cap %dc]",
+                                         ticker, series, my, mn, mc, pair_size, mnet * pair_size, opp["spread_cents"], current_cap)
+                                with open(TRADE_LOG, "a") as f:
+                                    f.write(f"{now.isoformat()} PAIR_SIM {ticker} "
+                                            f"YES@{my}c NO@{mn}c cost={mc}c x{pair_size} net={mnet*pair_size:.1f}c\n")
+                            else:
+                                # Live: place both limit orders at auto-scaled size
+                                try:
+                                    yes_resp = client.place_order(
+                                        ticker=ticker, side="yes", action="buy",
+                                        count=pair_size, order_type="limit", yes_price=my,
+                                    )
+                                    no_resp = client.place_order(
+                                        ticker=ticker, side="no", action="buy",
+                                        count=pair_size, order_type="limit", no_price=mn,
+                                    )
+                                    pair_risk.record_entry(mc * pair_size)
+                                    pair_risk.record_pair_complete(mc * pair_size)
+                                    record_series_complete(series)
+                                    log.info(">>> PAIR LIVE: %s YES@%dc NO@%dc x%d | orders placed",
+                                             ticker, my, mn, pair_size)
+                                    with open(TRADE_LOG, "a") as f:
+                                        f.write(f"{now.isoformat()} PAIR_LIVE {ticker} "
+                                                f"YES@{my}c NO@{mn}c cost={mc}c x{pair_size} "
+                                                f"net={mnet*pair_size:.1f}c\n")
+                                except Exception:
+                                    log.error("Pair order failed", exc_info=True)
+
+                            alert_trade_placed(ticker, "PAIR", mc * pair_size, pair_size, mnet * pair_size,
+                                               strategy=f"combined_pair:{args.mode}")
+                            pair_trades += 1
+
+            last_ml_action = ml_action
+            last_pair_action = pair_action
+            if ml_action == "trading" or pair_action == "trading":
+                should_write_state = True
 
         # ============================================================
         # STATE
         # ============================================================
-        if scan_count % 10 == 0 or ml_action == "trading" or pair_action == "trading":
+        if last_ticker and should_write_state:
             state = {
                 "time": now.isoformat(),
                 "mode": args.mode,
                 "scan": scan_count,
-                "ticker": ticker,
-                "remaining_s": int(remaining),
+                "ticker": last_ticker,
+                "remaining_s": last_remaining,
                 "btc_price": btc,
-                "ml_action": ml_action,
-                "pair_action": pair_action,
+                "ml_action": last_ml_action,
+                "pair_action": last_pair_action,
                 "ml_trades": ml_trades,
                 "pair_trades": pair_trades,
                 "daily_pnl": daily_pnl,
                 "pair_stats": pair_tracker.get_stats(),
                 "pair_risk": pair_risk.summary(),
-                "pair_size": auto_pair_size(pair_risk.completed_count, pair_risk.orphan_count),
-                "elastic_cap": elastic_pair_cap(),
-                "avg_spread": round(sum(_recent_spreads) / len(_recent_spreads), 1) if _recent_spreads else 0,
-                "spread_samples": len(_recent_spreads),
+                "per_series": {
+                    s: {
+                        "pair_size": series_pair_size(s),
+                        "elastic_cap": elastic_pair_cap(s),
+                        "completed": _series_completed.get(s, 0),
+                        "orphans": _series_orphans.get(s, 0),
+                        "avg_spread": round(sum(_series_spreads.get(s, [])) / len(_series_spreads[s]), 1) if _series_spreads.get(s) else 0,
+                    } for s in CRYPTO_SERIES
+                },
             }
             try:
                 STATE_FILE.write_text(json.dumps(state, indent=2, default=str))
