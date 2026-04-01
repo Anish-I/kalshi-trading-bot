@@ -435,7 +435,7 @@ while True:
                         "elastic_cap": elastic_pair_cap(s),
                         "completed": _series_completed.get(s, 0),
                         "orphans": _series_orphans.get(s, 0),
-                        "avg_spread": round(sum(_series_spreads.get(s, [])) / len(_series_spreads[s]), 1) if _series_spreads.get(s) else 0,
+                        "avg_spread": round(sum(_series_spreads.get(s, [])) / len(_series_spreads.get(s, [1])), 1) if _series_spreads.get(s) else 0,
                     } for s in CRYPTO_SERIES
                 },
             }
