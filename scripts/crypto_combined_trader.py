@@ -28,7 +28,7 @@ from engine.pair_risk import PairRiskManager
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", choices=["sim", "live"], default="sim")
-parser.add_argument("--pair-cap", type=int, default=96, help="Max maker pair cost in cents")
+parser.add_argument("--pair-cap", type=int, default=98, help="Max maker pair cost in cents")
 args = parser.parse_args()
 
 _lock = ProcessLock("crypto_combined")
@@ -61,8 +61,8 @@ SCHEMA_PATH = Path("D:/kalshi-models/latest_model.schema.json")
 ML_MAX_CONTRACTS = 3
 ML_MAX_ENTRY_PRICE = 0.45
 ML_MIN_EDGE = 0.03
-PAIR_MIN_NET = 1.0  # minimum 1c net profit for pair
-SCAN_INTERVAL = 30
+PAIR_MIN_NET = 0.5  # minimum 0.5c net profit for pair (more aggressive)
+SCAN_INTERVAL = 15  # scan every 15s to catch spread windows faster
 DAILY_LOSS_LIMIT = 500  # 5 dollars
 
 STATE_FILE = Path(settings.DATA_DIR) / "combined_trader_state.json"
@@ -151,7 +151,7 @@ while True:
         btc = get_btc_price()
 
         # ============================================================
-        # STRATEGY 1: ML CONJUNCTION
+        # STRATEGY 1: ML CONJUNCTION (research/log only — no live orders)
         # ============================================================
         ml_action = "no_signal"
         ml_side = None
@@ -193,7 +193,8 @@ while True:
                         if edge > ML_MIN_EDGE:
                             ml_action = "trading"
 
-                            if args.mode == "sim":
+                            # ML always runs in SIM (research only, no live orders)
+                            if True:
                                 traded_tickers_ml.add(ticker)
                                 log.info(">>> ML SIM: %s %s @%dc x%d | XGB=%s MOM=%s | BTC=$%s",
                                          ml_side.upper(), ticker, entry_cents, ML_MAX_CONTRACTS,
