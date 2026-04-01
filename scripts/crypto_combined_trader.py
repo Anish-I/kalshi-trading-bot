@@ -117,7 +117,7 @@ STATE_FILE = Path(settings.DATA_DIR) / "combined_trader_state.json"
 TRADE_LOG = Path(settings.DATA_DIR) / "logs" / "combined_trades.log"
 TRADE_LOG.parent.mkdir(parents=True, exist_ok=True)
 
-CRYPTO_SERIES = ["KXBTC15M", "KXETH15M"]
+CRYPTO_SERIES = ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXHYPE15M", "KXDOGE15M"]
 
 log.info("=" * 60)
 log.info("  CRYPTO COMBINED TRADER — %s mode", args.mode.upper())
