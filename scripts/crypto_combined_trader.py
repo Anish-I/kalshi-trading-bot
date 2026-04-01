@@ -64,6 +64,25 @@ ML_MIN_EDGE = 0.03
 PAIR_MIN_NET = 0.5  # minimum 0.5c net profit for pair (more aggressive)
 SCAN_INTERVAL = 15  # scan every 15s to catch spread windows faster
 
+# Auto-scaling: increase contracts as completed pairs accumulate without orphans
+PAIR_SCALE_TIERS = [
+    (0, 3),    # 0-19 completed pairs: 3 contracts
+    (20, 5),   # 20-49 completed pairs: 5 contracts
+    (50, 7),   # 50-99 completed pairs: 7 contracts
+    (100, 10), # 100+ completed pairs: 10 contracts
+]
+
+
+def auto_pair_size(completed: int, orphans: int) -> int:
+    """Scale pair size based on track record. Drops back if orphan rate is bad."""
+    if completed > 0 and orphans / completed > 0.1:
+        return 1  # orphan rate > 10% → minimum size
+
+    for threshold, size in reversed(PAIR_SCALE_TIERS):
+        if completed >= threshold:
+            return size
+    return 3
+
 # Elastic pair cap: adjusts based on recent spread history
 PAIR_CAP_FLOOR = 95   # tightest cap (most selective)
 PAIR_CAP_CEILING = 99  # loosest cap (most aggressive)
@@ -167,7 +186,8 @@ while True:
         ticker = market["ticker"]
         remaining = tracker.get_market_time_remaining(market)
 
-        if remaining < 60 or remaining > 780:
+        # Pair runs 24/7, ML only during valid windows
+        if remaining < 60:
             time.sleep(SCAN_INTERVAL)
             continue
 
@@ -292,32 +312,35 @@ while True:
                         traded_tickers_pair.add(ticker)
                         pair_action = "trading"
 
+                        # Auto-scale pair size based on track record
+                        pair_size = auto_pair_size(pair_risk.completed_count, pair_risk.orphan_count)
+
                         if args.mode == "sim":
                             pair = pair_tracker.start_pair(ticker, my, mn)
-                            pair.record_yes_fill(my, 1)
-                            pair.record_no_fill(mn, 1)
+                            pair.record_yes_fill(my, pair_size)
+                            pair.record_no_fill(mn, pair_size)
                             pair_tracker.complete_pair(ticker)
-                            pair_risk.record_entry(mc)
-                            pair_risk.record_pair_complete(mc)
+                            pair_risk.record_entry(mc * pair_size)
+                            pair_risk.record_pair_complete(mc * pair_size)
 
-                            log.info(">>> PAIR SIM: %s YES@%dc NO@%dc = %dc, +%.1fc net [spread %dc]",
-                                     ticker, my, mn, mc, mnet, opp["spread_cents"])
+                            log.info(">>> PAIR SIM: %s YES@%dc NO@%dc = %dc x%d, +%.1fc net [spread %dc]",
+                                     ticker, my, mn, mc, pair_size, mnet * pair_size, opp["spread_cents"])
                             with open(TRADE_LOG, "a") as f:
                                 f.write(f"{now.isoformat()} PAIR_SIM {ticker} "
-                                        f"YES@{my}c NO@{mn}c cost={mc}c net={mnet:.1f}c\n")
+                                        f"YES@{my}c NO@{mn}c cost={mc}c x{pair_size} net={mnet*pair_size:.1f}c\n")
                         else:
-                            # Live: place both limit orders
+                            # Live: place both limit orders at auto-scaled size
                             try:
                                 yes_resp = client.place_order(
                                     ticker=ticker, side="yes", action="buy",
-                                    count=3, order_type="limit", yes_price=my,
+                                    count=pair_size, order_type="limit", yes_price=my,
                                 )
                                 no_resp = client.place_order(
                                     ticker=ticker, side="no", action="buy",
-                                    count=3, order_type="limit", no_price=mn,
+                                    count=pair_size, order_type="limit", no_price=mn,
                                 )
-                                log.info(">>> PAIR LIVE: %s YES@%dc NO@%dc | orders placed",
-                                         ticker, my, mn)
+                                log.info(">>> PAIR LIVE: %s YES@%dc NO@%dc x%d | orders placed",
+                                         ticker, my, mn, pair_size)
                                 with open(TRADE_LOG, "a") as f:
                                     f.write(f"{now.isoformat()} PAIR_LIVE {ticker} "
                                             f"YES@{my}c NO@{mn}c cost={mc}c\n")
@@ -346,6 +369,7 @@ while True:
                 "daily_pnl": daily_pnl,
                 "pair_stats": pair_tracker.get_stats(),
                 "pair_risk": pair_risk.summary(),
+                "pair_size": auto_pair_size(pair_risk.completed_count, pair_risk.orphan_count),
                 "elastic_cap": elastic_pair_cap(),
                 "avg_spread": round(sum(_recent_spreads) / len(_recent_spreads), 1) if _recent_spreads else 0,
                 "spread_samples": len(_recent_spreads),
