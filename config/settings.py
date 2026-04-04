@@ -13,8 +13,8 @@ class Settings(BaseSettings):
     BINANCE_SYMBOL: str = "btcusdt"
     DATA_DIR: str = "D:/kalshi-data"
     MODEL_DIR: str = "D:/kalshi-models"
-    MAX_POSITION_CONTRACTS: int = 15
-    DAILY_LOSS_LIMIT_CENTS: int = 8000
+    MAX_POSITION_CONTRACTS: int = 20
+    DAILY_LOSS_LIMIT_CENTS: int = 12000
     CONFIDENCE_THRESHOLD: float = 0.65
     CONSECUTIVE_LOSS_HALT: int = 5
     COLLECTOR_STALE_SECONDS: int = 120
@@ -27,13 +27,13 @@ class Settings(BaseSettings):
 
     # Weather bot settings
     NWS_USER_AGENT: str = "KalshiWeatherBot (kalshi-weather-bot@example.com)"
-    WEATHER_EDGE_THRESHOLD: float = 0.22
-    WEATHER_MAX_CONTRACTS: int = 15
-    WEATHER_SCAN_INTERVAL_MINUTES: int = 5
-    WEATHER_TIER1_SIZE_MULTIPLIER: float = 1.5
-    WEATHER_TIER2_SIZE_MULTIPLIER: float = 1.0
+    WEATHER_EDGE_THRESHOLD: float = 0.18
+    WEATHER_MAX_CONTRACTS: int = 20
+    WEATHER_SCAN_INTERVAL_MINUTES: int = 3
+    WEATHER_TIER1_SIZE_MULTIPLIER: float = 2.0
+    WEATHER_TIER2_SIZE_MULTIPLIER: float = 1.5
     WEATHER_TIER3_LIVE_ENABLED: bool = True
-    WEATHER_TIER3_SIZE_MULTIPLIER: float = 0.3
+    WEATHER_TIER3_SIZE_MULTIPLIER: float = 0.5
 
     # Coinbase CDP API Key (for authenticated WebSocket)
     COINBASE_CDP_KEY_ID: str = ""

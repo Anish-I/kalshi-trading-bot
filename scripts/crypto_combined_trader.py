@@ -58,15 +58,15 @@ from data.storage import DataStorage
 MODEL_PATH = Path("D:/kalshi-models/latest_model.json")
 SCHEMA_PATH = Path("D:/kalshi-models/latest_model.schema.json")
 
-ML_MAX_CONTRACTS = 2
-ML_MAX_ENTRY_PRICE = 0.35
-ML_MIN_EDGE = 0.05
+ML_MAX_CONTRACTS = 5
+ML_MAX_ENTRY_PRICE = 0.40
+ML_MIN_EDGE = 0.04
 PAIR_MIN_NET = 5.0  # minimum 5c net profit per pair (raised from 2.5c to absorb orphan risk)
 SCAN_INTERVAL = 15  # scan every 15s to catch spread windows faster
 
 # Only trade pairs on series with wide enough spreads (avg > 4c).
 # BTC/ETH/SOL/XRP have 1-3c avg spreads → 80%+ orphan rate, net negative.
-PAIR_ENABLED_SERIES = {"KXHYPE15M", "KXDOGE15M"}
+PAIR_ENABLED_SERIES = {"KXHYPE15M", "KXDOGE15M", "KXSOL15M", "KXXRP15M"}
 
 # Per-series orphan timeouts (seconds) — raised to 60s to allow fills on thin books
 ORPHAN_TIMEOUT = {

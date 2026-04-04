@@ -277,8 +277,8 @@ class WeatherMarketAnalyzer:
                     continue
 
                 # --- Guardrail 2b: Entry price band ---
-                # Data shows 51-70c entries have 50% WR (+$5.43), outside 15-65c loses badly
-                if suggested_price_cents < 15 or suggested_price_cents > 65:
+                # Data shows 51-70c entries have 50% WR (+$5.43), outside 10-70c loses badly
+                if suggested_price_cents < 10 or suggested_price_cents > 70:
                     logger.debug("Skipping %s %s@%dc (outside 15-65c band)", ticker, side, suggested_price_cents)
                     continue
 

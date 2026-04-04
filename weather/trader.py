@@ -40,7 +40,7 @@ class WeatherTrader:
         self.risk_manager = RiskManager(
             max_contracts=settings.WEATHER_MAX_CONTRACTS,
             daily_loss_limit_cents=int(settings.DAILY_LOSS_LIMIT_CENTS * 0.4),
-            consecutive_loss_halt=4,
+            consecutive_loss_halt=6,
         )
 
         # --- Position tracking ---
