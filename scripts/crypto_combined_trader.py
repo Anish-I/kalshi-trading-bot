@@ -22,13 +22,13 @@ sys.path.insert(0, ".")
 
 from engine.process_lock import ProcessLock
 from engine.alerts import alert_trade_placed, alert_settlement
-from engine.pair_pricing import evaluate_pair_opportunity
+from engine.pair_pricing import evaluate_pair_opportunity, extract_book_from_orderbook
 from engine.pair_state import PairTracker
 from engine.pair_risk import PairRiskManager
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", choices=["sim", "live"], default="sim")
-parser.add_argument("--pair-cap", type=int, default=98, help="Max maker pair cost in cents")
+parser.add_argument("--pair-cap", type=int, default=95, help="Max maker pair cost in cents")
 args = parser.parse_args()
 
 _lock = ProcessLock("crypto_combined")
@@ -61,15 +61,26 @@ SCHEMA_PATH = Path("D:/kalshi-models/latest_model.schema.json")
 ML_MAX_CONTRACTS = 3
 ML_MAX_ENTRY_PRICE = 0.45
 ML_MIN_EDGE = 0.03
-PAIR_MIN_NET = 0.5  # minimum 0.5c net profit for pair (more aggressive)
+PAIR_MIN_NET = 5.0  # minimum 5c net profit per pair (raised from 2.5c to absorb orphan risk)
 SCAN_INTERVAL = 15  # scan every 15s to catch spread windows faster
+
+# Per-series orphan timeouts (seconds) — raised to 60s to allow fills on thin books
+ORPHAN_TIMEOUT = {
+    "KXBTC15M": 60,
+    "KXETH15M": 60,
+    "KXSOL15M": 60,
+    "KXXRP15M": 60,
+    "KXHYPE15M": 60,
+    "KXDOGE15M": 60,
+}
+DEFAULT_ORPHAN_TIMEOUT = 60
 
 # Auto-scaling: increase contracts as completed pairs accumulate without orphans
 PAIR_SCALE_TIERS = [
-    (0, 3),    # 0-19 completed pairs: 3 contracts
-    (20, 5),   # 20-49 completed pairs: 5 contracts
-    (50, 7),   # 50-99 completed pairs: 7 contracts
-    (100, 10), # 100+ completed pairs: 10 contracts
+    (0, 1),    # 0-9 completed pairs: 1 contract (prove it works first)
+    (10, 5),   # 10-29 completed: scale to 5
+    (30, 7),   # 30-49 completed: scale to 7
+    (50, 10),  # 50+ completed: full 10 contracts
 ]
 
 
@@ -85,13 +96,16 @@ def auto_pair_size(completed: int, orphans: int) -> int:
 
 # Elastic pair cap: adjusts based on recent spread history
 PAIR_CAP_FLOOR = 95
-PAIR_CAP_CEILING = 99
+PAIR_CAP_CEILING = 97
 PAIR_CAP_WINDOW = 20
 
 # Per-series elastic state
 _series_spreads: dict[str, list[int]] = {}
 _series_completed: dict[str, int] = {}
 _series_orphans: dict[str, int] = {}
+
+# 2-scan confirmation: only trade if spread qualified on previous scan too
+_series_spread_qualified: dict[str, bool] = {}
 
 
 def elastic_pair_cap(series: str) -> int:
@@ -130,7 +144,93 @@ def record_series_complete(series: str) -> None:
 
 def record_series_orphan(series: str) -> None:
     _series_orphans[series] = _series_orphans.get(series, 0) + 1
-DAILY_LOSS_LIMIT = 500  # 5 dollars
+MAX_DRAWDOWN = 2900  # $29 max loss from zero before halting
+
+# Trailing stop: tightens as confirmed profits grow
+# Below TRAILING_ACTIVATION: just use MAX_DRAWDOWN from zero
+# Above TRAILING_ACTIVATION: lock in TRAILING_LOCK_PCT of peak
+TRAILING_ACTIVATION = 500   # $5 — trailing only kicks in after meaningful profit
+TRAILING_LOCK_PCT = 0.5     # keep at least 50% of peak profit
+ORPHAN_RISK_DISCOUNT = 0.5  # orphans are open positions, not confirmed losses
+
+
+class TrailingStopLoss:
+    """Trailing stop that protects gains as they grow.
+
+    Two phases:
+    1. Warmup (peak < activation): allow full max_drawdown from zero
+    2. Trailing (peak >= activation): halt if P&L drops below peak * lock_pct
+
+    Orphan legs are NOT confirmed losses — they're open positions with ~50/50
+    settlement odds. We discount their risk accordingly.
+    """
+
+    def __init__(self, max_drawdown: int, activation: int, lock_pct: float,
+                 orphan_discount: float = 0.5, orphan_ttl_s: float = 900.0):
+        self.max_drawdown = max_drawdown
+        self.activation = activation      # trailing activates above this peak
+        self.lock_pct = lock_pct          # fraction of peak to protect
+        self.orphan_discount = orphan_discount
+        self.orphan_ttl_s = orphan_ttl_s  # orphan risk expires after market settles
+        self.confirmed_pnl = 0            # settled P&L from completed pairs
+        self._orphan_entries: list[tuple[float, int]] = []  # (timestamp, risk_cents)
+        self.peak_pnl = 0                 # highest estimated_pnl seen
+
+    @property
+    def orphan_risk(self) -> int:
+        """Active orphan risk — expired entries (settled markets) are dropped."""
+        now = time.monotonic()
+        self._orphan_entries = [(t, c) for t, c in self._orphan_entries
+                                if now - t < self.orphan_ttl_s]
+        return sum(c for _, c in self._orphan_entries)
+
+    @property
+    def estimated_pnl(self) -> int:
+        """Best estimate of current P&L (confirmed minus active orphan risk)."""
+        return self.confirmed_pnl - self.orphan_risk
+
+    def record_profit(self, cents: int) -> None:
+        """Record confirmed profit from a completed pair."""
+        self.confirmed_pnl += cents
+        if self.estimated_pnl > self.peak_pnl:
+            self.peak_pnl = self.estimated_pnl
+
+    def record_orphan(self, filled_cost_cents: int) -> None:
+        """Record an orphan leg. Risk decays after market settles (~15min)."""
+        risk = int(filled_cost_cents * self.orphan_discount)
+        self._orphan_entries.append((time.monotonic(), risk))
+
+    @property
+    def stop_price(self) -> int:
+        """P&L level at which trading halts."""
+        if self.peak_pnl < self.activation:
+            # Warmup: just use max drawdown from zero
+            return -self.max_drawdown
+        # Trailing: protect lock_pct of peak
+        return int(self.peak_pnl * self.lock_pct)
+
+    def should_halt(self) -> tuple[bool, str]:
+        """Check if we should stop trading."""
+        pnl = self.estimated_pnl
+        # Hard floor: never lose more than max_drawdown from zero
+        if pnl <= -self.max_drawdown:
+            return True, (f"max drawdown: pnl={pnl}c <= -{self.max_drawdown}c "
+                         f"(confirmed={self.confirmed_pnl}c orphan_risk={self.orphan_risk}c)")
+        # Trailing stop: only active after meaningful gains
+        if self.peak_pnl >= self.activation and pnl <= self.stop_price:
+            return True, (f"trailing stop: pnl={pnl}c <= stop={self.stop_price}c "
+                         f"(peak={self.peak_pnl}c, locking {self.lock_pct:.0%})")
+        return False, "ok"
+
+    def summary(self) -> dict:
+        return {
+            "confirmed_pnl": self.confirmed_pnl,
+            "orphan_risk": self.orphan_risk,
+            "estimated_pnl": self.estimated_pnl,
+            "peak_pnl": self.peak_pnl,
+            "stop_price": self.stop_price,
+            "trailing_active": self.peak_pnl >= self.activation,
+        }
 
 STATE_FILE = Path(settings.DATA_DIR) / "combined_trader_state.json"
 TRADE_LOG = Path(settings.DATA_DIR) / "logs" / "combined_trades.log"
@@ -147,7 +247,7 @@ log.info("=" * 60)
 
 client = KalshiClient()
 pair_tracker = PairTracker()
-pair_risk = PairRiskManager(pair_cap_cents=args.pair_cap, budget_cents=3000)
+pair_risk = PairRiskManager(pair_cap_cents=args.pair_cap, budget_cents=5000)
 
 # Load ML models
 xgb_model = XGBoostModel(str(MODEL_PATH))
@@ -155,7 +255,7 @@ momentum_model = MomentumModel()
 
 traded_tickers_ml = set()
 traded_tickers_pair = set()
-daily_pnl = 0
+trailing_stop = TrailingStopLoss(MAX_DRAWDOWN, TRAILING_ACTIVATION, TRAILING_LOCK_PCT, ORPHAN_RISK_DISCOUNT)
 scan_count = 0
 ml_trades = 0
 pair_trades = 0
@@ -221,9 +321,10 @@ while True:
         from kalshi.market_discovery import KXBTCMarketTracker
         _tracker = KXBTCMarketTracker(client)
 
-        if daily_pnl <= -DAILY_LOSS_LIMIT:
+        halt, halt_reason = trailing_stop.should_halt()
+        if halt:
             if scan_count % 20 == 0:
-                log.info("Daily loss limit hit: %+dc", daily_pnl)
+                log.info("Trading halted: %s", halt_reason)
             time.sleep(SCAN_INTERVAL)
             continue
 
@@ -245,6 +346,11 @@ while True:
             last_remaining = int(remaining)
             last_ml_action = ml_action
             last_pair_action = pair_action
+
+            # Re-check trailing stop inside loop (an orphan earlier in this scan could breach it)
+            halt, _ = trailing_stop.should_halt()
+            if halt:
+                break
 
             if remaining < 60:
                 last_ml_action = "skipped_short_window"
@@ -341,7 +447,6 @@ while True:
 
                 if ob:
                     # Track spread per-series for elastic cap
-                    from engine.pair_pricing import extract_book_from_orderbook
                     book = extract_book_from_orderbook(ob)
                     if book["spread_cents"] > 0:
                         track_series_spread(series, book["spread_cents"])
@@ -351,6 +456,9 @@ while True:
                     opp = evaluate_pair_opportunity(ob, pair_cap_cents=current_cap)
 
                     if opp["maker_tradeable"]:
+                        # Execute immediately on first qualifying scan (removed 2-scan
+                        # confirmation — it doubled latency and killed fill rates)
+
                         # Check budget with per-series scaled size
                         pair_size_check = series_pair_size(series)
                         can_open, reason = pair_risk.can_open_pair(opp["maker_pair_cost"] * pair_size_check)
@@ -372,6 +480,7 @@ while True:
                                 pair_tracker.complete_pair(ticker)
                                 pair_risk.record_entry(mc * pair_size)
                                 pair_risk.record_pair_complete(mc * pair_size)
+                                trailing_stop.record_profit(int(mnet * pair_size))
                                 record_series_complete(series)
 
                                 log.info(">>> PAIR SIM: %s [%s] YES@%dc NO@%dc = %dc x%d, +%.1fc net [spread %dc cap %dc]",
@@ -445,6 +554,7 @@ while True:
                                     if completed is None:
                                         return
                                     pair_risk.record_pair_complete(mc * pair_size)
+                                    trailing_stop.record_profit(int(mnet * pair_size))
                                     record_series_complete(series)
                                     completed_at = datetime.now(timezone.utc).isoformat()
                                     log.info(
@@ -516,7 +626,8 @@ while True:
                                 log.info(">>> PAIR LIVE: %s [%s] YES@%dc NO@%dc x%d | submitted yes=%s no=%s",
                                          ticker, series, my, mn, pair_size, yes_order_id, no_order_id)
 
-                                poll_deadline = time.monotonic() + 30.0
+                                poll_timeout = ORPHAN_TIMEOUT.get(series, DEFAULT_ORPHAN_TIMEOUT)
+                                poll_deadline = time.monotonic() + poll_timeout
                                 pair_completed = False
 
                                 while time.monotonic() < poll_deadline:
@@ -537,6 +648,23 @@ while True:
                                         _complete_live_pair()
                                         pair_completed = True
                                         break
+
+                                    # Check for adverse book move
+                                    try:
+                                        live_ob = client.get_orderbook(ticker, depth=3)
+                                        live_book = extract_book_from_orderbook(live_ob)
+                                        if pair.yes_filled and not pair.no_filled:
+                                            adverse = live_book["implied_no_ask"] - mn
+                                            if adverse > 5:
+                                                log.warning("Adverse move %dc on NO leg for %s, unwinding", adverse, ticker)
+                                                break
+                                        elif pair.no_filled and not pair.yes_filled:
+                                            adverse = live_book["implied_yes_ask"] - my
+                                            if adverse > 5:
+                                                log.warning("Adverse move %dc on YES leg for %s, unwinding", adverse, ticker)
+                                                break
+                                    except Exception:
+                                        pass
 
                                     time.sleep(1)
 
@@ -585,6 +713,7 @@ while True:
                                             elif resolved.no_filled:
                                                 loss_cents = resolved.no_filled_price * max(resolved.no_qty, 1)
                                             pair_risk.record_orphan(loss_cents)
+                                            trailing_stop.record_orphan(loss_cents)
                                             pair_risk.exposure_cents = max(0, pair_risk.exposure_cents - (mc * pair_size))
                                             record_series_orphan(series)
                                             orphaned_at = datetime.now(timezone.utc).isoformat()
@@ -628,6 +757,9 @@ while True:
                             alert_trade_placed(ticker, "PAIR", mc * pair_size, pair_size, mnet * pair_size,
                                                strategy=f"combined_pair:{args.mode}")
                             pair_trades += 1
+                    else:
+                        # Spread collapsed — reset qualification
+                        _series_spread_qualified.pop(f"{series}:{ticker}", None)
 
             last_ml_action = ml_action
             last_pair_action = pair_action
@@ -649,7 +781,8 @@ while True:
                 "pair_action": last_pair_action,
                 "ml_trades": ml_trades,
                 "pair_trades": pair_trades,
-                "daily_pnl": daily_pnl,
+                "estimated_pnl": trailing_stop.estimated_pnl,
+                "trailing_stop": trailing_stop.summary(),
                 "pair_stats": pair_tracker.get_stats(),
                 "pair_risk": pair_risk.summary(),
                 "per_series": {

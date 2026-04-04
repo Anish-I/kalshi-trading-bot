@@ -276,6 +276,12 @@ class WeatherMarketAnalyzer:
                     logger.debug("Skipping %s NO model_prob_no=%.1f%% (floor)", ticker, (1 - model_prob) * 100)
                     continue
 
+                # --- Guardrail 2b: Entry price band ---
+                # Data shows 51-70c entries have 50% WR (+$5.43), outside 15-65c loses badly
+                if suggested_price_cents < 15 or suggested_price_cents > 65:
+                    logger.debug("Skipping %s %s@%dc (outside 15-65c band)", ticker, side, suggested_price_cents)
+                    continue
+
                 # --- Guardrail 3: Edge cap ---
                 # 50%+ edge means model and market violently disagree.
                 # With 0/10 track record, the model is wrong.

@@ -88,7 +88,7 @@ def extract_book_from_orderbook(orderbook_response: dict) -> dict:
     }
 
 
-def evaluate_pair_opportunity(orderbook_response: dict, pair_cap_cents: int = 96) -> dict:
+def evaluate_pair_opportunity(orderbook_response: dict, pair_cap_cents: int = 95) -> dict:
     """Evaluate a pair opportunity from an orderbook snapshot.
 
     Since taker pair cost is always >= 100c, we evaluate MAKER opportunities:
@@ -113,7 +113,7 @@ def evaluate_pair_opportunity(orderbook_response: dict, pair_cap_cents: int = 96
     taker_arb = taker_cost > 0 and taker_cost <= pair_cap_cents and taker_gross > PAIR_FEE_CENTS
 
     # Maker opportunity (posting limits)
-    maker_tradeable = maker_cost > 0 and maker_cost <= pair_cap_cents and maker_net > 0
+    maker_tradeable = maker_cost > 0 and maker_cost <= pair_cap_cents and maker_net >= 2.5
 
     return {
         # Taker (crossing asks)

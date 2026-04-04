@@ -40,7 +40,7 @@ class WeatherTrader:
         self.risk_manager = RiskManager(
             max_contracts=settings.WEATHER_MAX_CONTRACTS,
             daily_loss_limit_cents=int(settings.DAILY_LOSS_LIMIT_CENTS * 0.4),
-            consecutive_loss_halt=2,
+            consecutive_loss_halt=4,
         )
 
         # --- Position tracking ---
@@ -306,10 +306,10 @@ class WeatherTrader:
 
             # --- Bracket sizing ---
             if opp.get("strike_type") == "between":
-                if opp["edge"] < 0.25:
-                    logger.info("Skipping bracket %s (edge %.0f%% < 25%%)", ticker, opp["edge"] * 100)
+                if opp["edge"] < 0.35:
+                    logger.info("Skipping bracket %s (edge %.0f%% < 35%%)", ticker, opp["edge"] * 100)
                     continue
-                order_contracts = max(1, order_contracts // 3)
+                order_contracts = max(1, order_contracts // 5)
 
             size_ok, size_reason = self.risk_manager.check_order_size(order_contracts)
             if not size_ok:

@@ -119,31 +119,41 @@ def _model_prob_above_threshold(
 ) -> float:
     """Estimate P(rate > threshold) at next FOMC meeting.
 
-    Simple model based on rate distance. Will be replaced by
-    CME FedWatch data when available.
+    Simple model based on rate distance with time decay for longer horizons.
+    Will be replaced by CME FedWatch data when available.
 
     Logic:
     - If threshold <= current_rate - 0.50: very likely above (95%+)
     - If threshold == current_rate: ~70% (slight hold bias)
     - If threshold == current_rate + 0.25: ~15% (unlikely hike)
     - If threshold >= current_rate + 0.50: ~5% (very unlikely)
+    - For horizons > 30 days: decay toward 50% (uncertainty increases)
     """
     diff = current_rate - threshold  # positive = threshold is below current
 
     if diff >= 0.75:
-        return 0.97
+        base_prob = 0.97
     elif diff >= 0.50:
-        return 0.92
+        base_prob = 0.92
     elif diff >= 0.25:
-        return 0.82
+        base_prob = 0.82
     elif diff >= 0.0:
-        return 0.70  # at current rate, slight hold bias
+        base_prob = 0.70  # at current rate, slight hold bias
     elif diff >= -0.25:
-        return 0.15  # one hike needed
+        base_prob = 0.15  # one hike needed
     elif diff >= -0.50:
-        return 0.05
+        base_prob = 0.05
     else:
-        return 0.02
+        base_prob = 0.02
+
+    # Time decay: longer horizons → more uncertainty → decay toward 50%
+    # e.g. 70% at 9 months → 0.70 * 0.63 + 0.50 * 0.37 ≈ 0.63 (not 0.70)
+    if days_to_fomc is not None and days_to_fomc > 30:
+        months_out = days_to_fomc / 30.0
+        decay = 0.95 ** months_out
+        base_prob = base_prob * decay + 0.50 * (1.0 - decay)
+
+    return base_prob
 
     # TODO: replace with CME FedWatch probabilities when feed is available
 
