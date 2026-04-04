@@ -58,11 +58,15 @@ from data.storage import DataStorage
 MODEL_PATH = Path("D:/kalshi-models/latest_model.json")
 SCHEMA_PATH = Path("D:/kalshi-models/latest_model.schema.json")
 
-ML_MAX_CONTRACTS = 3
-ML_MAX_ENTRY_PRICE = 0.45
-ML_MIN_EDGE = 0.03
+ML_MAX_CONTRACTS = 2
+ML_MAX_ENTRY_PRICE = 0.35
+ML_MIN_EDGE = 0.05
 PAIR_MIN_NET = 5.0  # minimum 5c net profit per pair (raised from 2.5c to absorb orphan risk)
 SCAN_INTERVAL = 15  # scan every 15s to catch spread windows faster
+
+# Only trade pairs on series with wide enough spreads (avg > 4c).
+# BTC/ETH/SOL/XRP have 1-3c avg spreads → 80%+ orphan rate, net negative.
+PAIR_ENABLED_SERIES = {"KXHYPE15M", "KXDOGE15M"}
 
 # Per-series orphan timeouts (seconds) — raised to 60s to allow fills on thin books
 ORPHAN_TIMEOUT = {
@@ -399,8 +403,8 @@ while True:
                             if edge > ML_MIN_EDGE:
                                 ml_action = "trading"
 
-                                # ML always runs in SIM (research only, no live orders)
-                                if True:
+                                # ML: SIM in sim mode, LIVE in live mode
+                                if args.mode == "sim":
                                     traded_tickers_ml.add(ticker)
                                     log.info(">>> ML SIM: %s %s @%dc x%d | XGB=%s MOM=%s | BTC=$%s",
                                              ml_side.upper(), ticker, entry_cents, ML_MAX_CONTRACTS,
@@ -450,6 +454,10 @@ while True:
                     book = extract_book_from_orderbook(ob)
                     if book["spread_cents"] > 0:
                         track_series_spread(series, book["spread_cents"])
+
+                    # Skip pair trading on tight-spread series (BTC/ETH/SOL/XRP)
+                    if series not in PAIR_ENABLED_SERIES:
+                        continue
 
                     current_cap = elastic_pair_cap(series)
                     pair_risk.pair_cap_cents = current_cap

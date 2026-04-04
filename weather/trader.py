@@ -299,6 +299,13 @@ class WeatherTrader:
             if tier == 3 and not settings.WEATHER_TIER3_LIVE_ENABLED:
                 logger.info("Skipping tier-3 city %s (MAE > 3.5F)", city_short)
                 continue
+            elif tier == 3:
+                # Tier 3 enabled but small size, threshold markets only
+                t3_mult = getattr(settings, "WEATHER_TIER3_SIZE_MULTIPLIER", 0.3)
+                order_contracts = max(1, int(order_contracts * t3_mult))
+                if opp.get("strike_type") == "between":
+                    logger.info("Skipping tier-3 bracket %s (too unreliable)", ticker)
+                    continue
             elif tier == 2:
                 order_contracts = max(1, int(order_contracts * settings.WEATHER_TIER2_SIZE_MULTIPLIER))
             elif tier == 1:
