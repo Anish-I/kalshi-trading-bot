@@ -40,7 +40,7 @@ class WeatherTrader:
         self.risk_manager = RiskManager(
             max_contracts=settings.WEATHER_MAX_CONTRACTS,
             daily_loss_limit_cents=int(settings.DAILY_LOSS_LIMIT_CENTS * 0.4),
-            consecutive_loss_halt=6,
+            consecutive_loss_halt=8,
         )
 
         # --- Position tracking ---
@@ -247,8 +247,8 @@ class WeatherTrader:
     def execute_trades(
         self,
         opportunities: list[dict],
-        max_trades: int = 3,
-        contracts_per_trade: int = 10,
+        max_trades: int = 10,
+        contracts_per_trade: int = 20,
     ) -> list[dict]:
         """Place orders on the best opportunities.
 
@@ -317,6 +317,14 @@ class WeatherTrader:
                     logger.info("Skipping bracket %s (edge %.0f%% < 35%%)", ticker, opp["edge"] * 100)
                     continue
                 order_contracts = max(1, order_contracts // 5)
+
+            # --- Edge-scaled sizing: bigger edge → bigger position ---
+            edge = opp.get("edge", 0)
+            if edge >= 0.40:
+                order_contracts = int(order_contracts * 2.0)   # 40%+ edge: double down
+            elif edge >= 0.30:
+                order_contracts = int(order_contracts * 1.5)   # 30%+ edge: 1.5x
+            # Under 30%: base size
 
             size_ok, size_reason = self.risk_manager.check_order_size(order_contracts)
             if not size_ok:
