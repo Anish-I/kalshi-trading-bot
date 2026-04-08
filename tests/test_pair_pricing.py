@@ -93,6 +93,33 @@ def test_maker_opportunity():
     assert opp["maker_net"] > 0
 
 
+def test_min_maker_net_threshold_rejects_marginal():
+    """min_maker_net=5.0 should reject opportunities tradable at default 2.5."""
+    ob = {
+        "orderbook_fp": {
+            # best_yes_bid=50, best_no_bid=44 -> maker 51+45=96, gross=4, net~1.86
+            "yes_dollars": [["0.4500", "100"], ["0.5000", "50"]],
+            "no_dollars": [["0.4000", "100"], ["0.4400", "50"]],
+        }
+    }
+    opp_default = evaluate_pair_opportunity(ob, pair_cap_cents=96)
+    opp_strict = evaluate_pair_opportunity(ob, pair_cap_cents=96, min_maker_net=5.0)
+    # Default threshold 2.5: not tradable (net ~1.86 < 2.5 anyway). Pick a case
+    # where default=True and strict=False.
+
+    ob2 = {
+        "orderbook_fp": {
+            # best_yes_bid=50, best_no_bid=42 -> maker 51+43=94, gross=6, net~3.86
+            "yes_dollars": [["0.4500", "100"], ["0.5000", "50"]],
+            "no_dollars": [["0.4000", "100"], ["0.4200", "50"]],
+        }
+    }
+    opp_default2 = evaluate_pair_opportunity(ob2, pair_cap_cents=96)
+    opp_strict2 = evaluate_pair_opportunity(ob2, pair_cap_cents=96, min_maker_net=5.0)
+    assert opp_default2["maker_tradeable"] is True  # net ~3.86 >= 2.5
+    assert opp_strict2["maker_tradeable"] is False  # net ~3.86 < 5.0
+
+
 def test_tight_market_no_maker_opportunity():
     """Tight market: maker pair cost too high."""
     ob = {

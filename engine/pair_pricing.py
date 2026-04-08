@@ -88,7 +88,11 @@ def extract_book_from_orderbook(orderbook_response: dict) -> dict:
     }
 
 
-def evaluate_pair_opportunity(orderbook_response: dict, pair_cap_cents: int = 95) -> dict:
+def evaluate_pair_opportunity(
+    orderbook_response: dict,
+    pair_cap_cents: int = 95,
+    min_maker_net: float = 2.5,
+) -> dict:
     """Evaluate a pair opportunity from an orderbook snapshot.
 
     Since taker pair cost is always >= 100c, we evaluate MAKER opportunities:
@@ -97,6 +101,8 @@ def evaluate_pair_opportunity(orderbook_response: dict, pair_cap_cents: int = 95
     Args:
         orderbook_response: Raw Kalshi orderbook response.
         pair_cap_cents: Maximum total cost for the pair.
+        min_maker_net: Minimum net profit (cents) required for maker_tradeable.
+            Defaults to 2.5 for backward compat with existing callers.
 
     Returns:
         Dict with opportunity details.
@@ -113,7 +119,7 @@ def evaluate_pair_opportunity(orderbook_response: dict, pair_cap_cents: int = 95
     taker_arb = taker_cost > 0 and taker_cost <= pair_cap_cents and taker_gross > PAIR_FEE_CENTS
 
     # Maker opportunity (posting limits)
-    maker_tradeable = maker_cost > 0 and maker_cost <= pair_cap_cents and maker_net >= 2.5
+    maker_tradeable = maker_cost > 0 and maker_cost <= pair_cap_cents and maker_net >= min_maker_net
 
     return {
         # Taker (crossing asks)

@@ -515,7 +515,7 @@ while True:
 
                     current_cap = elastic_pair_cap(series)
                     pair_risk.pair_cap_cents = current_cap
-                    opp = evaluate_pair_opportunity(ob, pair_cap_cents=current_cap)
+                    opp = evaluate_pair_opportunity(ob, pair_cap_cents=current_cap, min_maker_net=PAIR_MIN_NET)
 
                     if opp["maker_tradeable"]:
                         # Execute immediately on first qualifying scan (removed 2-scan
