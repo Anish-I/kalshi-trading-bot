@@ -63,6 +63,8 @@ class TradeJournal:
         net_ev_cents_per_contract: float | None = None,
         bucket_trade_count: int | None = None,
         calibration_version: str | None = None,
+        gate_reason_code: str | None = None,
+        gate_checks_json: str | None = None,
     ) -> None:
         """Log a trading decision (trade or no-trade)."""
         entry = {
@@ -91,6 +93,8 @@ class TradeJournal:
             "net_ev_cents_per_contract": net_ev_cents_per_contract,
             "bucket_trade_count": bucket_trade_count,
             "calibration_version": calibration_version,
+            "gate_reason_code": gate_reason_code,
+            "gate_checks_json": gate_checks_json,
         }
 
         # Per-model votes
