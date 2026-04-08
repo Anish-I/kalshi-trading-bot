@@ -65,6 +65,7 @@ ML_MAX_CONTRACTS = 10
 ML_MAX_ENTRY_PRICE = 0.45
 ML_MIN_EDGE = 0.03
 PAIR_MIN_NET = 5.0  # minimum 5c net profit per pair (raised from 2.5c to absorb orphan risk)
+FLATTEN_MAX_SLIPPAGE_CENTS = 5  # refuse flatten if exit is worse than entry by more than this
 SCAN_INTERVAL = 15  # scan every 15s to catch spread windows faster
 
 # Only trade pairs on series with wide enough spreads (avg > 4c).
@@ -799,13 +800,88 @@ while True:
                                         _complete_live_pair()
                                         pair_completed = True
                                     else:
+                                        # Attempt to flatten the filled leg before recording orphan.
+                                        # Without this, the filled leg runs to settlement at 100c/0c,
+                                        # leaving directional exposure for ~15min.
+                                        filled_side = "yes" if pair.yes_filled else "no"
+                                        filled_qty = pair.yes_qty if pair.yes_filled else pair.no_qty
+                                        filled_price = (
+                                            pair.yes_filled_price if pair.yes_filled else pair.no_filled_price
+                                        )
+                                        flatten_proceeds_cents = 0
+                                        flatten_exit_price = None
+                                        flatten_attempted = False
+                                        try:
+                                            flat_ob = client.get_orderbook(ticker, depth=1)
+                                            flat_book = extract_book_from_orderbook(flat_ob)
+                                            # Selling a YES position: hit best YES bid.
+                                            # Selling a NO position: hit best NO bid.
+                                            exit_bid = (
+                                                flat_book["best_yes_bid"]
+                                                if filled_side == "yes"
+                                                else flat_book["best_no_bid"]
+                                            )
+                                            # Slippage = how much worse than entry price the exit is.
+                                            slippage = filled_price - exit_bid
+                                            if exit_bid <= 0:
+                                                log.warning(
+                                                    "PAIR_ORPHAN_HOLD_TO_SETTLE ticker=%s filled_side=%s "
+                                                    "reason=no_exit_liquidity",
+                                                    ticker, filled_side,
+                                                )
+                                            elif slippage > FLATTEN_MAX_SLIPPAGE_CENTS:
+                                                log.warning(
+                                                    "PAIR_ORPHAN_HOLD_TO_SETTLE ticker=%s filled_side=%s "
+                                                    "reason=flatten_slippage_too_wide entry=%dc exit=%dc slippage=%dc",
+                                                    ticker, filled_side, filled_price, exit_bid, slippage,
+                                                )
+                                            else:
+                                                flatten_attempted = True
+                                                try:
+                                                    client.place_order(
+                                                        ticker=ticker,
+                                                        side=filled_side,
+                                                        action="sell",
+                                                        count=filled_qty,
+                                                        order_type="market",
+                                                    )
+                                                    flatten_exit_price = exit_bid
+                                                    flatten_proceeds_cents = exit_bid * filled_qty
+                                                    realized = (filled_price * filled_qty) - flatten_proceeds_cents
+                                                    log.warning(
+                                                        "PAIR_ORPHAN_FLATTENED ticker=%s filled_side=%s "
+                                                        "entry=%dc exit=%dc realized_loss_cents=%d",
+                                                        ticker, filled_side, filled_price, exit_bid, realized,
+                                                    )
+                                                except Exception:
+                                                    log.error(
+                                                        "PAIR_ORPHAN_FLATTEN_FAILED ticker=%s filled_side=%s",
+                                                        ticker, filled_side, exc_info=True,
+                                                    )
+                                                    flatten_exit_price = None
+                                                    flatten_proceeds_cents = 0
+                                        except Exception:
+                                            log.warning(
+                                                "PAIR_ORPHAN_FLATTEN_BOOK_FAILED ticker=%s",
+                                                ticker, exc_info=True,
+                                            )
+
                                         resolved = pair_tracker.resolve_orphan(ticker, "timeout")
                                         if resolved is not None:
-                                            loss_cents = 0
-                                            if resolved.yes_filled:
-                                                loss_cents = resolved.yes_filled_price * max(resolved.yes_qty, 1)
-                                            elif resolved.no_filled:
-                                                loss_cents = resolved.no_filled_price * max(resolved.no_qty, 1)
+                                            qty = max(
+                                                resolved.yes_qty if resolved.yes_filled else resolved.no_qty,
+                                                1,
+                                            )
+                                            entry_px = (
+                                                resolved.yes_filled_price if resolved.yes_filled
+                                                else resolved.no_filled_price
+                                            )
+                                            if flatten_exit_price is not None:
+                                                # Realized loss after flatten: cost basis - proceeds
+                                                loss_cents = max(0, (entry_px * qty) - flatten_proceeds_cents)
+                                            else:
+                                                # Hold-to-settle fallback: expected ~-0.5 * entry * qty on average
+                                                loss_cents = int(round(0.5 * entry_px * qty))
                                             pair_risk.record_orphan(loss_cents)
                                             trailing_stop.record_orphan(loss_cents)
                                             pair_risk.exposure_cents = max(0, pair_risk.exposure_cents - (mc * pair_size))
