@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     CRYPTO_EV_BUFFER_CENTS: float = 2.0
     CRYPTO_MIN_NET_EV_CENTS: float = 1.0
 
+    # Phase 2: family scorecard
+    SCORECARD_WINDOW_HOURS: int = 48
+    SCORECARD_SHADOW_MODE: bool = True  # flip to False to enable throttling
+    SCORECARD_CACHE_PATH: str = "D:/kalshi-data/family_scorecard.parquet"
+
     # Weather bot settings
     NWS_USER_AGENT: str = "KalshiWeatherBot (kalshi-weather-bot@example.com)"
     WEATHER_EDGE_THRESHOLD: float = 0.15

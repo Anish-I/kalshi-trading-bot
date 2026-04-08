@@ -266,9 +266,23 @@ _GATE_RISK_MGR = RiskManager(
 )
 _GATE_FAMILY_LIMITS = FamilyLimits()
 _GATE_FAMILY_LIMITS._cooldown_s = 0.0
+from engine.family_scorecard import FamilyScorecard as _FamilyScorecard
+_scorecard = _FamilyScorecard(
+    window_hours=settings.SCORECARD_WINDOW_HOURS,
+    cache_path=Path(settings.SCORECARD_CACHE_PATH),
+    shadow_mode=settings.SCORECARD_SHADOW_MODE,
+)
+def _scorecard_hook(ctx):
+    h = _scorecard.get_family_health(ctx.family)
+    return (
+        h.healthy or settings.SCORECARD_SHADOW_MODE,
+        f"family={ctx.family} score={h.score:.2f}",
+        h.metrics,
+    )
 _pre_trade_gate = PreTradeGate(
     risk_mgr=_GATE_RISK_MGR,
     family_limits=_GATE_FAMILY_LIMITS,
+    scorecard_hook=_scorecard_hook,
 )
 _gate_state: dict = {"last": None}
 

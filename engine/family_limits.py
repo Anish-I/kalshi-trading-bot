@@ -15,11 +15,12 @@ logger = logging.getLogger(__name__)
 class FamilyLimits:
     """Track per-family exposure and enforce budget caps."""
 
-    def __init__(self):
+    def __init__(self, scorecard=None):
         self._exposure: dict[str, int] = {}  # family_name → cents currently at risk
         self._trade_count: dict[str, int] = {}
         self._last_trade_time: dict[str, str] = {}
         self._cooldown_s: float = 30.0  # minimum seconds between trades in same family
+        self.scorecard = scorecard
 
     def _get_family(self, family_name: str) -> MarketFamily | None:
         return MARKET_FAMILIES.get(family_name) or PHASE4_CANDIDATES.get(family_name)
@@ -44,10 +45,19 @@ class FamilyLimits:
             return False, f"unknown family: {family_name}"
 
         current = self._exposure.get(family_name, 0)
-        if current + proposed_cents > family.budget_cents:
+        effective_budget = family.budget_cents
+        if self.scorecard is not None:
+            try:
+                health = self.scorecard.get_family_health(family_name)
+                remaining = max(0, family.budget_cents - current)
+                throttled_remaining = int(remaining * float(health.throttle_multiplier))
+                effective_budget = current + throttled_remaining
+            except Exception:
+                logger.warning("FamilyLimits: scorecard lookup failed for %s", family_name)
+        if current + proposed_cents > effective_budget:
             return False, (
                 f"family budget exceeded: {current + proposed_cents}c > "
-                f"{family.budget_cents}c cap for {family_name}"
+                f"{effective_budget}c cap for {family_name}"
             )
 
         # Cooldown check
