@@ -25,6 +25,9 @@ from engine.alerts import alert_trade_placed, alert_settlement
 from engine.pair_pricing import evaluate_pair_opportunity, extract_book_from_orderbook
 from engine.pair_state import PairTracker
 from engine.pair_risk import PairRiskManager
+from engine.pre_trade_gate import PreTradeGate, GateContext
+from engine.risk import RiskManager
+from engine.family_limits import FamilyLimits
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", choices=["sim", "live"], default="sim")
@@ -254,6 +257,25 @@ client = KalshiClient()
 pair_tracker = PairTracker()
 pair_risk = PairRiskManager(pair_cap_cents=args.pair_cap, budget_cents=5000)
 
+# Phase 1b: unified pre-trade gate (additive — existing inline checks remain authoritative).
+_GATE_RISK_MGR = RiskManager(
+    max_contracts=10_000,
+    daily_loss_limit_cents=10_000_000,
+    consecutive_loss_halt=10_000,
+)
+_GATE_FAMILY_LIMITS = FamilyLimits()
+_GATE_FAMILY_LIMITS._cooldown_s = 0.0
+_pre_trade_gate = PreTradeGate(
+    risk_mgr=_GATE_RISK_MGR,
+    family_limits=_GATE_FAMILY_LIMITS,
+)
+_gate_state: dict = {"last": None}
+
+
+def _series_to_family(series: str) -> str:
+    # All KX*15M crypto series share the btc_15m family budget for gate purposes.
+    return "btc_15m"
+
 # Load ML models
 xgb_model = XGBoostModel(str(MODEL_PATH))
 momentum_model = MomentumModel()
@@ -404,6 +426,37 @@ while True:
                             if edge > ML_MIN_EDGE:
                                 ml_action = "trading"
 
+                                # Phase 1b: pre-trade gate
+                                try:
+                                    _ml_gate_ctx = GateContext(
+                                        ticker=ticker,
+                                        family=_series_to_family(series),
+                                        side=ml_side,
+                                        entry_cents=int(entry_cents),
+                                        contracts=int(ML_MAX_CONTRACTS),
+                                        yes_ask=float(yes_ask or 0),
+                                        no_ask=float(no_ask or 0),
+                                        model_prob=0.5,
+                                        quote_age_s=0.0,
+                                        max_stale_s=60.0,
+                                        session_tag="any",
+                                        strategy_tag="combined_ml",
+                                        calibration_artifact=None,
+                                    )
+                                    _ml_gate_decision = _pre_trade_gate.evaluate(_ml_gate_ctx)
+                                except Exception:
+                                    log.exception("pre_trade_gate (ml) eval error — proceeding")
+                                    _ml_gate_decision = None
+                                if _ml_gate_decision is not None:
+                                    _gate_state["last"] = _ml_gate_decision.to_json()
+                                    if not _ml_gate_decision.allowed:
+                                        log.info(
+                                            "GATE BLOCK [%s] %s: %s",
+                                            ticker, _ml_gate_decision.reason_code,
+                                            _ml_gate_decision.reason_detail,
+                                        )
+                                        continue
+
                                 # ML: SIM in sim mode, LIVE in live mode
                                 if args.mode == "sim":
                                     traded_tickers_ml.add(ticker)
@@ -476,6 +529,38 @@ while True:
                             mn = opp["maker_no_price"]
                             mc = opp["maker_pair_cost"]
                             mnet = opp["maker_net"]
+
+                            # Phase 1b: pre-trade gate (covers both YES + NO legs)
+                            try:
+                                _pair_gate_ctx = GateContext(
+                                    ticker=ticker,
+                                    family=_series_to_family(series),
+                                    side="yes",
+                                    entry_cents=int(my),
+                                    contracts=int(pair_size_check),
+                                    yes_ask=float(my) / 100.0,
+                                    no_ask=float(mn) / 100.0,
+                                    model_prob=0.5,
+                                    quote_age_s=0.0,
+                                    max_stale_s=60.0,
+                                    session_tag="any",
+                                    strategy_tag="combined_pair",
+                                    calibration_artifact=None,
+                                )
+                                _pair_gate_decision = _pre_trade_gate.evaluate(_pair_gate_ctx)
+                            except Exception:
+                                log.exception("pre_trade_gate (pair) eval error — proceeding")
+                                _pair_gate_decision = None
+                            if _pair_gate_decision is not None:
+                                _gate_state["last"] = _pair_gate_decision.to_json()
+                                if not _pair_gate_decision.allowed:
+                                    log.info(
+                                        "GATE BLOCK [%s] %s: %s",
+                                        ticker, _pair_gate_decision.reason_code,
+                                        _pair_gate_decision.reason_detail,
+                                    )
+                                    continue
+
                             traded_tickers_pair.add(ticker)
                             pair_action = "trading"
 
@@ -803,6 +888,7 @@ while True:
                         "avg_spread": round(sum(_series_spreads.get(s, [])) / len(_series_spreads.get(s, [1])), 1) if _series_spreads.get(s) else 0,
                     } for s in CRYPTO_SERIES
                 },
+                "gate_last_decision": _gate_state["last"],
             }
             try:
                 STATE_FILE.write_text(json.dumps(state, indent=2, default=str))

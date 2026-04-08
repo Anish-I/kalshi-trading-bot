@@ -55,6 +55,9 @@ from engine.crypto_decision import (
 )
 from engine.session_tags import get_session_tag, is_live_session
 from engine.alerts import alert_trade_placed, alert_settlement, alert_risk_halt
+from engine.pre_trade_gate import PreTradeGate, GateContext
+from engine.risk import RiskManager
+from engine.family_limits import FamilyLimits
 
 _log_file = "crypto_sim.log" if _pre_parsed.simulate else "crypto_live.log"
 logging.basicConfig(
@@ -92,6 +95,22 @@ else:
     SIM_MIN_AGREEMENT = 2.0
     SIM_MIN_EDGE = 0.03
 STATE_FILE = Path(settings.DATA_DIR) / "ml_trader_state.json"
+
+# Phase 1b: unified pre-trade gate.  Permissive defaults so the gate is purely
+# additive — existing inline checks (edge, agreement, entry price cap) keep
+# their authority; the gate adds a machine-readable reason code on top.
+_GATE_RISK_MGR = RiskManager(
+    max_contracts=10_000,
+    daily_loss_limit_cents=10_000_000,
+    consecutive_loss_halt=10_000,
+)
+_GATE_FAMILY_LIMITS = FamilyLimits()
+_GATE_FAMILY_LIMITS._cooldown_s = 0.0  # disable cooldown — traders enforce their own pacing
+_pre_trade_gate = PreTradeGate(
+    risk_mgr=_GATE_RISK_MGR,
+    family_limits=_GATE_FAMILY_LIMITS,
+)
+_gate_state: dict = {"last": None}
 
 
 def get_latest_model_path():
@@ -604,6 +623,7 @@ def main():
                 "daily_pnl_cents": daily_pnl,
                 "balance": round(c.get_balance(), 2) if scan_count % 10 == 0 else None,
                 "simulate": effective_simulate,
+                "gate_last_decision": _gate_state["last"],
             }
             write_state(state)
 
@@ -629,6 +649,42 @@ def main():
                 "mean_reversion": {"vote": mr_vote.upper(), "confidence": round(mr_conf * 100, 1)},
                 "kalshi_consensus": {"vote": kalshi_vote.upper(), "confidence": round(kalshi_conf * 100, 1)},
             }
+            # Phase 1b: pre-trade gate (additive to existing inline checks).
+            gate_decision = None
+            gate_reason_code_kw: str | None = None
+            gate_checks_json_kw: str | None = None
+            if action == "trading" and side:
+                try:
+                    gate_ctx = GateContext(
+                        ticker=ticker,
+                        family="btc_15m",
+                        side=side,
+                        entry_cents=int(entry_price_cents or 0),
+                        contracts=MAX_CONTRACTS,
+                        yes_ask=float(yes_ask or 0),
+                        no_ask=float(no_ask or 0),
+                        model_prob=float(calibrated_p_win) if calibrated_p_win is not None else 0.5,
+                        quote_age_s=0.0,
+                        max_stale_s=60.0,
+                        session_tag=session or "any",
+                        strategy_tag="ml",
+                        calibration_artifact=calibration if calibration.get("exists") else None,
+                    )
+                    gate_decision = _pre_trade_gate.evaluate(gate_ctx)
+                except Exception:
+                    log.exception("pre_trade_gate eval error — proceeding with inline checks only")
+                    gate_decision = None
+                if gate_decision is not None:
+                    _gate_state["last"] = gate_decision.to_json()
+                    gate_reason_code_kw = gate_decision.reason_code
+                    gate_checks_json_kw = json.dumps(gate_decision.checks, default=str)
+                    if not gate_decision.allowed:
+                        log.info(
+                            "GATE BLOCK [%s] %s: %s",
+                            ticker, gate_decision.reason_code, gate_decision.reason_detail,
+                        )
+                        action = "gate_blocked"
+
             if action == "trading":
                 contracts = MAX_CONTRACTS
                 bet_dollars = contracts * entry_price_cents / 100
@@ -638,6 +694,8 @@ def main():
                     side=side, entry_price=entry_price_cents, contracts=contracts,
                     bet_dollars=bet_dollars, edge=round(edge, 4) if side else None,
                     features_snapshot=last_row if last_row else None,
+                    gate_reason_code=gate_reason_code_kw,
+                    gate_checks_json=gate_checks_json_kw,
                     session_tag=session,
                     effective_simulate=effective_simulate,
                     rule_name=state["rule"],

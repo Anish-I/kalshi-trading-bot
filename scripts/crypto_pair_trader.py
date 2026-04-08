@@ -30,6 +30,23 @@ from engine.pair_pricing import evaluate_pair_opportunity
 from engine.pair_risk import PairRiskManager
 from engine.pair_state import PairTrade, PairTracker
 from engine.process_lock import ProcessLock
+from engine.pre_trade_gate import PreTradeGate, GateContext
+from engine.risk import RiskManager
+from engine.family_limits import FamilyLimits
+
+# Phase 1b: shared pre-trade gate (additive — existing risk checks remain authoritative).
+_GATE_RISK_MGR = RiskManager(
+    max_contracts=10_000,
+    daily_loss_limit_cents=10_000_000,
+    consecutive_loss_halt=10_000,
+)
+_GATE_FAMILY_LIMITS = FamilyLimits()
+_GATE_FAMILY_LIMITS._cooldown_s = 0.0
+_pre_trade_gate = PreTradeGate(
+    risk_mgr=_GATE_RISK_MGR,
+    family_limits=_GATE_FAMILY_LIMITS,
+)
+_gate_state: dict = {"last": None}
 from kalshi.client import KalshiClient
 from kalshi.market_discovery import KXBTCMarketTracker
 
@@ -368,6 +385,7 @@ def _build_state_payload(
         "active_pair_details": active,
         "stats": stats,
         "risk": risk_summary,
+        "gate_last_decision": _gate_state["last"],
         **latest_scan,
     }
 
@@ -729,6 +747,37 @@ def _run_scan(
         log.warning("Skipping paired order placement on %s because Kalshi WS is not connected", ticker)
         state_update["risk_blocked"] = "ws_not_connected"
         return state_update
+
+    # Phase 1b: pre-trade gate (covers both YES + NO legs of the pair).
+    try:
+        _gate_ctx = GateContext(
+            ticker=ticker,
+            family="btc_15m",
+            side="yes",
+            entry_cents=int(yes_price),
+            contracts=1,
+            yes_ask=float(yes_price) / 100.0,
+            no_ask=float(no_price) / 100.0,
+            model_prob=0.5,
+            quote_age_s=0.0,
+            max_stale_s=60.0,
+            session_tag="any",
+            strategy_tag="pair",
+            calibration_artifact=None,
+        )
+        _gate_decision = _pre_trade_gate.evaluate(_gate_ctx)
+    except Exception:
+        log.exception("pre_trade_gate eval error — proceeding")
+        _gate_decision = None
+    if _gate_decision is not None:
+        _gate_state["last"] = _gate_decision.to_json()
+        if not _gate_decision.allowed:
+            log.info(
+                "GATE BLOCK [%s] %s: %s",
+                ticker, _gate_decision.reason_code, _gate_decision.reason_detail,
+            )
+            state_update["risk_blocked"] = f"gate:{_gate_decision.reason_code}"
+            return state_update
 
     _place_real_pair(
         client=client,
