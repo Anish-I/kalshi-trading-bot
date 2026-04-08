@@ -310,6 +310,69 @@ def get_pairs():
     return {"state": state, "trades": trades}
 
 
+@app.get("/api/families")
+def api_families():
+    """Return per-family health from FamilyScorecard."""
+    try:
+        from engine.family_scorecard import FamilyScorecard
+        sc = FamilyScorecard(
+            shadow_mode=settings.SCORECARD_SHADOW_MODE,
+            window_hours=settings.SCORECARD_WINDOW_HOURS,
+        )
+        healths = sc.compute()
+        return {
+            "shadow_mode": settings.SCORECARD_SHADOW_MODE,
+            "window_hours": settings.SCORECARD_WINDOW_HOURS,
+            "families": [
+                {
+                    "family": h.family,
+                    "healthy": h.healthy,
+                    "score": h.score,
+                    "throttle_multiplier": h.throttle_multiplier,
+                    "metrics": h.metrics,
+                }
+                for h in healths.values()
+            ],
+        }
+    except Exception as e:
+        return {
+            "shadow_mode": getattr(settings, "SCORECARD_SHADOW_MODE", True),
+            "window_hours": getattr(settings, "SCORECARD_WINDOW_HOURS", 48),
+            "error": str(e),
+            "families": [],
+        }
+
+
+GATE_STATE_FILES = {
+    "combined_trader": DATA_DIR / "combined_trader_state.json",
+    "ml_trader": DATA_DIR / "ml_trader_state.json",
+    "pair_trader": DATA_DIR / "pair_trader_state.json",
+}
+
+
+@app.get("/api/gate/recent")
+def api_gate_recent():
+    """Return last gate_last_decision from each trader's state file."""
+    out = {}
+    for name, path in GATE_STATE_FILES.items():
+        try:
+            if Path(path).exists():
+                data = json.loads(Path(path).read_text())
+                out[name] = {
+                    "state_time": data.get("time"),
+                    "gate_last_decision": data.get("gate_last_decision"),
+                }
+            else:
+                out[name] = {
+                    "state_time": None,
+                    "gate_last_decision": None,
+                    "error": "state file missing",
+                }
+        except Exception as e:
+            out[name] = {"error": str(e)}
+    return out
+
+
 @app.get("/api/logs")
 def get_logs():
     """Return live state from both traders."""
