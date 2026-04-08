@@ -25,6 +25,7 @@ class XGBoostModel:
         # Load feature schema if available
         schema_path = model_path.replace('.json', '.schema.json')
         self.feature_cols: list[str] | None = None
+        self.feature_set: str = "honest"
         try:
             import json
             with open(schema_path) as f:
@@ -32,10 +33,15 @@ class XGBoostModel:
             # Handle both formats: plain list or dict with "features" key
             if isinstance(raw, list):
                 self.feature_cols = raw
-            elif isinstance(raw, dict) and "features" in raw:
-                self.feature_cols = raw["features"]
+            elif isinstance(raw, dict):
+                if "features" in raw:
+                    self.feature_cols = raw["features"]
+                self.feature_set = str(raw.get("feature_set", "honest"))
             if self.feature_cols:
-                logger.info("Loaded feature schema (%d cols) from %s", len(self.feature_cols), schema_path)
+                logger.info(
+                    "Loaded feature schema (%d cols, feature_set=%s) from %s",
+                    len(self.feature_cols), self.feature_set, schema_path,
+                )
         except Exception:
             logger.warning("No feature schema at %s, using dynamic columns", schema_path)
         logger.info("XGBoost loaded from %s", model_path)

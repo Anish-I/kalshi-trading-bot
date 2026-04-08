@@ -3,6 +3,8 @@
 import sys
 sys.path.insert(0, ".")
 
+import argparse
+import contextlib
 import json
 import logging
 import shutil
@@ -14,7 +16,31 @@ import pandas as pd
 import xgboost as xgb
 from sklearn.metrics import accuracy_score, classification_report, log_loss
 
-from features.honest_features import HONEST_FEATURE_NAMES, compute_honest_features
+from features.honest_features import (
+    HONEST_FEATURE_NAMES,
+    compute_all_features,
+    compute_honest_features,
+)
+
+
+@contextlib.contextmanager
+def _macro_features_enabled(enable: bool):
+    """Temporarily toggle MACRO_FEATURES_ENABLED on the settings module for
+    the duration of this process without persisting to disk."""
+    from config import settings as settings_module
+    s = settings_module.settings
+    prev = getattr(s, "MACRO_FEATURES_ENABLED", False)
+    try:
+        object.__setattr__(s, "MACRO_FEATURES_ENABLED", bool(enable))
+    except Exception:
+        setattr(s, "MACRO_FEATURES_ENABLED", bool(enable))
+    try:
+        yield
+    finally:
+        try:
+            object.__setattr__(s, "MACRO_FEATURES_ENABLED", prev)
+        except Exception:
+            setattr(s, "MACRO_FEATURES_ENABLED", prev)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -52,7 +78,24 @@ def walk_forward_split(n: int, n_folds: int, purge: int):
         yield np.arange(0, train_end), np.arange(test_start, test_end)
 
 
+def _parse_args():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--features",
+        choices=["honest", "honest_plus_macro"],
+        default="honest",
+        help="Feature set to train on. 'honest' = 32 baseline features. "
+             "'honest_plus_macro' = baseline + optional macro features "
+             "(MACRO_FEATURES_ENABLED toggled in-process only).",
+    )
+    return p.parse_args()
+
+
 def main():
+    args = _parse_args()
+    feature_set = args.features
+    use_macro = feature_set == "honest_plus_macro"
+
     # ------------------------------------------------------------------
     # 1. Load data
     # ------------------------------------------------------------------
@@ -68,9 +111,22 @@ def main():
     # ------------------------------------------------------------------
     # 2. Compute features
     # ------------------------------------------------------------------
-    log.info("Computing 32 honest features...")
-    df = compute_honest_features(raw)
-    log.info(f"After feature computation: {len(df):,} rows")
+    log.info(f"Computing features (feature_set={feature_set})...")
+    with _macro_features_enabled(use_macro):
+        if use_macro:
+            df = compute_all_features(raw)
+        else:
+            df = compute_honest_features(raw)
+    # Build feature list: honest baseline + any extra columns macro added.
+    if use_macro:
+        extra = [c for c in df.columns if c not in HONEST_FEATURE_NAMES
+                 and c not in {"timestamp", "open", "high", "low", "close",
+                               "volume", "buy_volume", "sell_volume", "trade_count",
+                               "ts", "label"}]
+        feature_names = list(HONEST_FEATURE_NAMES) + extra
+    else:
+        feature_names = list(HONEST_FEATURE_NAMES)
+    log.info(f"After feature computation: {len(df):,} rows, {len(feature_names)} features")
 
     # ------------------------------------------------------------------
     # 3. Create labels
@@ -81,11 +137,14 @@ def main():
     df = df.iloc[:-FORWARD_BARS].reset_index(drop=True)
     df["label"] = df["label"].astype(int)
 
-    X = df[HONEST_FEATURE_NAMES].values
+    # Drop rows with NaN in any feature (macro features may introduce NaN)
+    df = df.dropna(subset=feature_names).reset_index(drop=True)
+
+    X = df[feature_names].values
     y = df["label"].values
     n = len(y)
 
-    log.info(f"Final dataset: {n:,} samples, {len(HONEST_FEATURE_NAMES)} features")
+    log.info(f"Final dataset: {n:,} samples, {len(feature_names)} features")
 
     # ------------------------------------------------------------------
     # 4. Diagnostics
@@ -98,7 +157,7 @@ def main():
     for cls_id, cnt in class_counts.items():
         print(f"  {class_names[cls_id]:>5}: {cnt:>7,}  ({100 * cnt / n:.1f}%)")
     print(f"  {'TOTAL':>5}: {n:>7,}")
-    print(f"  Features: {len(HONEST_FEATURE_NAMES)}")
+    print(f"  Features: {len(feature_names)}")
     print("=" * 60)
 
     # Compute scale_pos_weight equivalent for multiclass
@@ -237,8 +296,9 @@ def main():
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
-    model_path = MODEL_DIR / f"xgb_honest_{timestamp}.json"
-    schema_path = MODEL_DIR / f"xgb_honest_{timestamp}.schema.json"
+    name_stem = "xgb_honest_plus_macro" if use_macro else "xgb_honest"
+    model_path = MODEL_DIR / f"{name_stem}_{timestamp}.json"
+    schema_path = MODEL_DIR / f"{name_stem}_{timestamp}.schema.json"
     latest_model = MODEL_DIR / "latest_model.json"
     latest_schema = MODEL_DIR / "latest_model.schema.json"
 
@@ -246,10 +306,11 @@ def main():
     log.info(f"Model saved: {model_path}")
 
     schema = {
-        "model_type": "xgb_honest",
+        "model_type": name_stem,
+        "feature_set": feature_set,
         "timestamp": timestamp,
-        "features": HONEST_FEATURE_NAMES,
-        "n_features": len(HONEST_FEATURE_NAMES),
+        "features": feature_names,
+        "n_features": len(feature_names),
         "n_classes": n_classes,
         "class_map": class_names,
         "forward_bars": FORWARD_BARS,
@@ -274,7 +335,7 @@ def main():
     print(f"  Schema:   {schema_path}")
     print(f"  Latest:   {latest_model}")
     print(f"  Samples:  {n:,}")
-    print(f"  Features: {len(HONEST_FEATURE_NAMES)}")
+    print(f"  Features: {len(feature_names)}  ({feature_set})")
     print(f"  CV acc:   {avg_acc:.4f}")
     print(f"  CV loss:  {avg_ll:.4f}")
     print("=" * 60)

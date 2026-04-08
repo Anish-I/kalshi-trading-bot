@@ -149,3 +149,44 @@ def test_loader_tolerates_kalshi_archive_metadata():
     assert decision["price_bucket"] == "45c"
     assert round(decision["calibrated_p_win"], 3) == 0.500
     assert decision["bucket_trade_count"] == 80
+
+
+def test_loader_handles_feature_set_field():
+    """Forward-compat: loader must read feature_set from either top-level or metadata,
+    and default to 'honest' for legacy artifacts that predate the field."""
+    # honest artifact (top-level field)
+    honest_path = _write_artifact({
+        "metadata": {"artifact_id": "h1", "generated_at": "2026-04-01T00:00:00+00:00",
+                     "bucket_width_cents": 5, "min_trades": 50,
+                     "ev_buffer_cents": 2.0, "min_net_ev_cents": 1.0},
+        "feature_set": "honest",
+        "rows": [],
+        "version": "h1",
+    })
+    h = load_crypto_calibration(honest_path)
+    assert h["exists"] is True
+    assert h["feature_set"] == "honest"
+
+    # honest_plus_macro artifact (field nested under metadata)
+    macro_path = _write_artifact({
+        "metadata": {"artifact_id": "hm1", "generated_at": "2026-04-01T00:00:00+00:00",
+                     "bucket_width_cents": 5, "min_trades": 50,
+                     "ev_buffer_cents": 2.0, "min_net_ev_cents": 1.0,
+                     "feature_set": "honest_plus_macro"},
+        "rows": [],
+        "version": "hm1",
+    })
+    hm = load_crypto_calibration(macro_path)
+    assert hm["exists"] is True
+    assert hm["feature_set"] == "honest_plus_macro"
+
+    # legacy artifact (no feature_set) defaults to "honest"
+    legacy_path = _write_artifact({
+        "metadata": {"artifact_id": "L", "generated_at": "2026-04-01T00:00:00+00:00",
+                     "bucket_width_cents": 5, "min_trades": 50,
+                     "ev_buffer_cents": 2.0, "min_net_ev_cents": 1.0},
+        "rows": [],
+        "version": "L",
+    })
+    legacy = load_crypto_calibration(legacy_path)
+    assert legacy["feature_set"] == "honest"

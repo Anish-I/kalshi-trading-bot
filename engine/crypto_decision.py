@@ -64,6 +64,10 @@ def load_crypto_calibration(path: str | Path) -> dict:
     return {
         "path": str(artifact_path),
         "exists": True,
+        "feature_set": str(
+            raw.get("feature_set")
+            or raw.get("metadata", {}).get("feature_set", "honest")
+        ),
         "version": raw.get("version", raw.get("calibration_version", raw.get("metadata", {}).get("artifact_id", ""))),
         "generated_at": raw.get("generated_at", raw.get("timestamp", raw.get("metadata", {}).get("generated_at", ""))),
         "summary": raw.get("summary", {}),

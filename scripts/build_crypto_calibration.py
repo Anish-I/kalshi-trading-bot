@@ -4,11 +4,32 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+
+@contextlib.contextmanager
+def _macro_features_enabled(enable: bool):
+    """Temporarily toggle MACRO_FEATURES_ENABLED on the settings module
+    in-process only (never persisted to disk)."""
+    from config import settings as settings_module
+    s = settings_module.settings
+    prev = getattr(s, "MACRO_FEATURES_ENABLED", False)
+    try:
+        object.__setattr__(s, "MACRO_FEATURES_ENABLED", bool(enable))
+    except Exception:
+        setattr(s, "MACRO_FEATURES_ENABLED", bool(enable))
+    try:
+        yield
+    finally:
+        try:
+            object.__setattr__(s, "MACRO_FEATURES_ENABLED", prev)
+        except Exception:
+            setattr(s, "MACRO_FEATURES_ENABLED", prev)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -26,7 +47,7 @@ from engine.crypto_calibration import (
     session_tag_for_timestamp,
 )
 from engine.market_archive import load_quotes_and_trades
-from features.honest_features import compute_honest_features
+from features.honest_features import compute_all_features, compute_honest_features
 
 
 DEFAULT_DATA_FILE = Path("D:/kalshi-data/binance_history/klines_90d.parquet")
@@ -173,6 +194,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-trades", type=int, default=int(settings.CRYPTO_CALIBRATION_MIN_TRADES))
     parser.add_argument("--ev-buffer-cents", type=float, default=float(settings.CRYPTO_EV_BUFFER_CENTS))
     parser.add_argument("--min-net-ev-cents", type=float, default=float(settings.CRYPTO_MIN_NET_EV_CENTS))
+    parser.add_argument(
+        "--features",
+        choices=["honest", "honest_plus_macro"],
+        default="honest",
+        help="Feature set to calibrate on. Must match the trained model.",
+    )
     parser.add_argument(
         "--use-kalshi-archive",
         action="store_true",
@@ -363,6 +390,7 @@ def _build_from_kalshi_archive(args: argparse.Namespace) -> int:
         events,
         metadata={
             "source_mode": "kalshi_archive",
+            "feature_set": args.features,
             "kalshi_series": series_list,
             "kalshi_archive_range": f"{start_d.isoformat()} to {end_d.isoformat()}",
             "settled_trades": len(df),
@@ -437,6 +465,16 @@ def main() -> int:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+    use_macro = args.features == "honest_plus_macro"
+
+    # Embed feature_set into default output path so honest/honest_plus_macro
+    # artifacts don't clobber each other. Kalshi-mode output is handled
+    # separately inside _build_from_kalshi_archive.
+    if args.output == Path(settings.CRYPTO_CALIBRATION_PATH) and use_macro:
+        args.output = args.output.with_name(
+            args.output.stem + "_honest_plus_macro" + args.output.suffix
+        )
+
     if args.use_kalshi_archive:
         return _build_from_kalshi_archive(args)
 
@@ -452,7 +490,11 @@ def main() -> int:
         raise ValueError(f"Schema missing features: {schema_path}")
 
     raw = pd.read_parquet(args.data_file)
-    featured = compute_honest_features(raw)
+    with _macro_features_enabled(use_macro):
+        if use_macro:
+            featured = compute_all_features(raw)
+        else:
+            featured = compute_honest_features(raw)
     featured = featured.copy()
     featured["label"] = make_honest_labels(featured["close"], forward_bars=args.forward_bars, threshold_bps=args.threshold_bps)
     featured = featured.dropna(subset=["label"]).reset_index(drop=True)
@@ -488,7 +530,12 @@ def main() -> int:
             "forward_bars": args.forward_bars,
             "threshold_bps": args.threshold_bps,
             "signal_rule": "xgb+momentum_conjunction",
-            "features_source": "features.honest_features.compute_honest_features",
+            "feature_set": args.features,
+            "features_source": (
+                "features.honest_features.compute_all_features"
+                if use_macro else
+                "features.honest_features.compute_honest_features"
+            ),
             "source_rows": len(featured),
             "conjunction_events": len(events),
         },
