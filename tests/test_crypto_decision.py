@@ -102,3 +102,50 @@ def test_missing_or_unsupported_bucket_returns_no_calibration():
     assert decision["price_bucket"] == "50c"
     assert summary["exists"] is True
     assert summary["version"] == "artifact-456"
+
+
+def test_loader_tolerates_kalshi_archive_metadata():
+    """Phase 5: loader must accept new top-level metadata fields."""
+    path = _write_artifact(
+        {
+            "version": "kalshi-archive-001",
+            "generated_at": "2026-04-08T00:00:00+00:00",
+            "bucket_size_cents": 5,
+            "data_source": "kalshi_archive",
+            "kalshi_archive_range": "2026-03-09 to 2026-04-08",
+            "kalshi_series": ["KXBTC15M", "KXETH15M"],
+            "summary": {
+                "tradable_bucket_count": 1,
+                "best_bucket": {"side": "yes", "price_bucket": 45},
+                "worst_bucket": {"side": "yes", "price_bucket": 45},
+            },
+            "rows": [
+                {
+                    "side": "yes",
+                    "price_bucket": 45,
+                    "n_trades": 80,
+                    "win_rate": 0.50,
+                    "gross_ev_cents_per_contract": 5.0,
+                    "net_ev_cents_per_contract": 3.0,
+                    "tradable": True,
+                }
+            ],
+        }
+    )
+    artifact = load_crypto_calibration(path)
+    assert artifact["exists"] is True
+    assert artifact["version"] == "kalshi-archive-001"
+    assert artifact["bucket_size_cents"] == 5
+
+    decision = evaluate_calibrated_trade(
+        artifact,
+        side="yes",
+        entry_cents=45,
+        min_trades=50,
+        ev_buffer_cents=2.0,
+        min_net_ev_cents=1.0,
+    )
+    assert decision["status"] == "trading"
+    assert decision["price_bucket"] == "45c"
+    assert round(decision["calibrated_p_win"], 3) == 0.500
+    assert decision["bucket_trade_count"] == 80
