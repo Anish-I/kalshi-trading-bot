@@ -16,6 +16,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Kalshi fees (approximate — actual fees are variable by price/size)
+# TODO: VERIFY — codex flagged that Kalshi charges maker fees on executed resting orders; PDF fetch failed, manual verification needed
 FEE_PER_CONTRACT_PER_SIDE_CENTS = 1.07
 PAIR_FEE_CENTS = FEE_PER_CONTRACT_PER_SIDE_CENTS * 2  # ~2.14c total
 
