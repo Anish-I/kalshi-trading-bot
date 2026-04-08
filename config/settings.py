@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     SCORECARD_SHADOW_MODE: bool = True  # flip to False to enable throttling
     SCORECARD_CACHE_PATH: str = "D:/kalshi-data/family_scorecard.parquet"
 
+    # Phase 6: macro crypto features (default OFF — no live behavior change)
+    MACRO_FEATURES_ENABLED: bool = False
+    MACRO_DATA_ROOT: str = "D:/kalshi-data/macro"
+
     # Weather bot settings
     NWS_USER_AGENT: str = "KalshiWeatherBot (kalshi-weather-bot@example.com)"
     WEATHER_EDGE_THRESHOLD: float = 0.15

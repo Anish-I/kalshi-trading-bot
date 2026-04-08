@@ -173,3 +173,25 @@ def compute_honest_features(bars_1m: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=HONEST_FEATURE_NAMES).reset_index(drop=True)
 
     return df
+
+
+def compute_all_features(df, settings=None):
+    """Compute honest features + macro features if enabled in settings.
+
+    The macro features are strictly additive and guarded by the
+    ``MACRO_FEATURES_ENABLED`` flag in ``config.settings`` (default False).
+    """
+    if settings is None:
+        from config import settings as _s
+        settings = _s
+    honest = compute_honest_features(df)
+    if getattr(settings, "MACRO_FEATURES_ENABLED", False):
+        from pathlib import Path
+
+        from features.macro_crypto_features import attach_macro_features
+        macro_root = Path(getattr(settings, "MACRO_DATA_ROOT", "D:/kalshi-data/macro"))
+        # honest_features keeps a "timestamp" column; attach_macro_features
+        # defaults to ts_col="ts". Use whichever column is present.
+        ts_col = "ts" if "ts" in honest.columns else "timestamp"
+        honest = attach_macro_features(honest, macro_root, ts_col=ts_col)
+    return honest
