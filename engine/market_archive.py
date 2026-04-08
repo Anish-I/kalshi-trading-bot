@@ -58,6 +58,73 @@ def load_archive(
     return result
 
 
+TRADE_COLUMNS = [
+    "trade_id",
+    "ticker",
+    "created_time",
+    "yes_price_cents",
+    "no_price_cents",
+    "count",
+    "taker_side",
+]
+
+
+def _coerce_date(d) -> date:
+    if isinstance(d, date):
+        return d
+    if isinstance(d, str):
+        return date.fromisoformat(d)
+    raise TypeError(f"Unsupported date type: {type(d)}")
+
+
+def load_trade_archive(
+    series: str,
+    start_date,
+    end_date,
+) -> pd.DataFrame:
+    """Load trade snapshots written by scripts/backfill_kalshi_trades.py.
+
+    Reads {series}_trades.parquet from each date in [start_date, end_date]
+    (inclusive) and concatenates. Dates may be passed as ``date`` objects or
+    ``"YYYY-MM-DD"`` strings. Returns an empty DataFrame with the canonical
+    trade columns if nothing is found.
+    """
+    sd = _coerce_date(start_date)
+    ed = _coerce_date(end_date)
+
+    frames = []
+    d = sd
+    while d <= ed:
+        path = ARCHIVE_DIR / d.isoformat() / f"{series}_trades.parquet"
+        if path.exists():
+            try:
+                frames.append(pd.read_parquet(path))
+            except Exception:
+                logger.warning("Failed to read %s", path)
+        d += timedelta(days=1)
+
+    if not frames:
+        return pd.DataFrame(columns=TRADE_COLUMNS)
+
+    result = pd.concat(frames, ignore_index=True)
+    if "created_time" in result.columns:
+        result = result.sort_values("created_time").reset_index(drop=True)
+    if "trade_id" in result.columns:
+        result = result.drop_duplicates(subset=["trade_id"], keep="last").reset_index(drop=True)
+    return result
+
+
+def load_quotes_and_trades(
+    series: str,
+    start_date,
+    end_date,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load both quote snapshots (via load_archive) and trade history."""
+    sd = _coerce_date(start_date)
+    ed = _coerce_date(end_date)
+    return load_archive(series, sd, ed), load_trade_archive(series, sd, ed)
+
+
 def get_archive_status() -> dict:
     """Get archive health info for the dashboard."""
     if not ARCHIVE_DIR.exists():
