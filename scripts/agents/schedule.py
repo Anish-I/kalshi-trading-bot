@@ -27,7 +27,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.agents import snapshot as snapshot_mod  # noqa: E402
-from scripts.agents import run_session  # noqa: E402
+from scripts.agents import run_session  # noqa: E402  (managed-agents provider)
+from scripts.agents import run_claude_headless  # noqa: E402  (claude -p provider, default)
 
 
 def _todays_tokens() -> int:
@@ -67,23 +68,33 @@ def _write_heartbeat(task: str, status: str, exit_code: int) -> None:
     )
 
 
-def run_reporter() -> int:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print(
-            "ANTHROPIC_API_KEY not set; cannot run scheduled reporter",
-            file=sys.stderr,
-        )
-        _write_heartbeat("reporter", "missing_api_key", 2)
-        return 2
+def run_reporter(provider: str = "claude-headless") -> int:
+    """Run the daily reporter.
 
-    used = _todays_tokens()
-    if used > DAILY_TOKEN_CAP:
-        print(
-            f"daily token cap exceeded ({used} > {DAILY_TOKEN_CAP})",
-            file=sys.stderr,
-        )
-        _write_heartbeat("reporter", "budget_exceeded", 6)
-        return 6
+    Providers:
+      - "claude-headless" (default): uses `claude -p` subprocess. Uses existing
+        Claude Code OAuth — no ANTHROPIC_API_KEY needed. Zero per-session cost.
+      - "managed-agents": uses the Anthropic Managed Agents beta API. Requires
+        ANTHROPIC_API_KEY. Reserved for future use cases that need cloud
+        isolation (e.g. P5 parameter search).
+    """
+    if provider == "managed-agents":
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            print(
+                "ANTHROPIC_API_KEY not set; cannot run managed-agents provider",
+                file=sys.stderr,
+            )
+            _write_heartbeat("reporter", "missing_api_key", 2)
+            return 2
+
+        used = _todays_tokens()
+        if used > DAILY_TOKEN_CAP:
+            print(
+                f"daily token cap exceeded ({used} > {DAILY_TOKEN_CAP})",
+                file=sys.stderr,
+            )
+            _write_heartbeat("reporter", "budget_exceeded", 6)
+            return 6
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -92,7 +103,10 @@ def run_reporter() -> int:
         out_dir = tmp_path / "out"
         out_dir.mkdir()
 
-        code = run_session.run("kalshi-reporter", tarball, out_dir)
+        if provider == "managed-agents":
+            code = run_session.run("kalshi-reporter", tarball, out_dir)
+        else:
+            code = run_claude_headless.run_headless_reporter(tarball, out_dir)
 
         # Copy report.md / stats.json into Obsidian (if produced)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -112,9 +126,15 @@ def run_reporter() -> int:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("task", choices=["reporter"])
+    ap.add_argument(
+        "--provider",
+        choices=["claude-headless", "managed-agents"],
+        default="claude-headless",
+        help="Runner backend (default: claude-headless — uses OAuth, no API key)",
+    )
     args = ap.parse_args()
     if args.task == "reporter":
-        return run_reporter()
+        return run_reporter(provider=args.provider)
     return 1
 
 

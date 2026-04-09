@@ -60,10 +60,21 @@ def test_deploy_dry_run_prints_payload():
     assert '"model": "claude-sonnet-4-6"' in proc.stdout
 
 
-def test_schedule_refuses_missing_api_key():
+def test_managed_agents_provider_refuses_missing_api_key():
+    """The managed-agents provider (opt-in) still requires the API key.
+
+    The default provider is claude-headless, which uses OAuth and needs no
+    key. This test pins the --provider managed-agents opt-in behavior.
+    """
     env = _clean_env()
     proc = subprocess.run(
-        [sys.executable, "scripts/agents/schedule.py", "reporter"],
+        [
+            sys.executable,
+            "scripts/agents/schedule.py",
+            "reporter",
+            "--provider",
+            "managed-agents",
+        ],
         cwd=str(REPO_ROOT),
         env=env,
         capture_output=True,
