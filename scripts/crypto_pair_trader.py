@@ -30,18 +30,45 @@ from engine.pair_pricing import evaluate_pair_opportunity
 from engine.pair_risk import PairRiskManager
 from engine.pair_state import PairTrade, PairTracker
 from engine.process_lock import ProcessLock
-from engine.pre_trade_gate import PreTradeGate, GateContext
+from engine.pre_trade_gate import PreTradeGate, GateContext, GateDecision
 from engine.risk import RiskManager
 from engine.family_limits import FamilyLimits
+from engine.gate_risk_adapter import RiskManagerAdapter, FamilyLimitsAdapter
 
-# Phase 1b: shared pre-trade gate (additive — existing risk checks remain authoritative).
-_GATE_RISK_MGR = RiskManager(
-    max_contracts=10_000,
-    daily_loss_limit_cents=10_000_000,
-    consecutive_loss_halt=10_000,
-)
-_GATE_FAMILY_LIMITS = FamilyLimits()
-_GATE_FAMILY_LIMITS._cooldown_s = 0.0
+
+def _pt_compute_session_tag(now_utc) -> str:
+    h = now_utc.hour
+    if 13 <= h <= 20:
+        return "us_core"
+    elif 7 <= h <= 12:
+        return "eu_core"
+    elif 0 <= h <= 6:
+        return "asia_core"
+    else:
+        return "overnight"
+
+
+# The live PairRiskManager is created in main() — we wire the adapter against
+# a mutable holder so the gate sees live exposure/budget once main() runs.
+_GATE_RISK_HOLDER: dict = {"risk": None}
+
+
+def _pt_can_trade() -> tuple[bool, str]:
+    return True, "ok"  # pair_trader has no global kill-switch beyond risk check below
+
+
+def _pt_family_exposure(_family: str) -> int:
+    r = _GATE_RISK_HOLDER.get("risk")
+    return int(r.exposure_cents) if r is not None else 0
+
+
+def _pt_family_budget(_family: str) -> int:
+    r = _GATE_RISK_HOLDER.get("risk")
+    return int(r.budget_cents) if r is not None else 10_000_000
+
+
+_GATE_RISK_MGR = RiskManagerAdapter(_pt_can_trade, max_contracts=10_000)
+_GATE_FAMILY_LIMITS = FamilyLimitsAdapter(_pt_family_exposure, _pt_family_budget)
 from engine.family_scorecard import FamilyScorecard as _FamilyScorecard
 _scorecard = _FamilyScorecard(
     window_hours=settings.SCORECARD_WINDOW_HOURS,
@@ -663,6 +690,7 @@ def _run_scan(
     if remaining < 60 or remaining > 780:
         return {"ticker": ticker, "remaining_s": int(remaining), "skipped_window": True}
 
+    _quote_fetch_ts = time.monotonic()
     try:
         orderbook = client.get_orderbook(ticker, depth=5)
     except Exception:
@@ -763,26 +791,40 @@ def _run_scan(
         return state_update
 
     # Phase 1b: pre-trade gate (covers both YES + NO legs of the pair).
+    _gate_ctx = GateContext(
+        ticker=ticker,
+        family="btc_15m",
+        side="yes",
+        entry_cents=int(yes_price),
+        contracts=1,
+        yes_ask=float(yes_price) / 100.0,
+        no_ask=float(no_price) / 100.0,
+        yes_bid=float(opp.get("best_yes_bid", 0) or 0) / 100.0,
+        no_bid=float(opp.get("best_no_bid", 0) or 0) / 100.0,
+        model_prob=0.5,
+        quote_age_s=float(time.monotonic() - _quote_fetch_ts),
+        max_stale_s=60.0,
+        session_tag=_pt_compute_session_tag(datetime.now(timezone.utc)),
+        strategy_tag="pair",
+        calibration_artifact=None,
+    )
     try:
-        _gate_ctx = GateContext(
-            ticker=ticker,
-            family="btc_15m",
-            side="yes",
-            entry_cents=int(yes_price),
-            contracts=1,
-            yes_ask=float(yes_price) / 100.0,
-            no_ask=float(no_price) / 100.0,
-            model_prob=0.5,
-            quote_age_s=0.0,
-            max_stale_s=60.0,
-            session_tag="any",
-            strategy_tag="pair",
-            calibration_artifact=None,
-        )
         _gate_decision = _pre_trade_gate.evaluate(_gate_ctx)
-    except Exception:
-        log.exception("pre_trade_gate eval error — proceeding")
-        _gate_decision = None
+    except Exception as _gate_exc:
+        log.error(
+            "GATE_EXCEPTION ticker=%s strategy=pair mode=%s",
+            ticker, args.mode, exc_info=True,
+        )
+        if args.mode == "live":
+            state_update["risk_blocked"] = "gate_exception_fail_closed"
+            return state_update
+        _gate_decision = GateDecision(
+            allowed=True,
+            reason_code="gate_exception_sim_fail_open",
+            reason_detail=f"exception ignored in sim: {type(_gate_exc).__name__}",
+            contracts_adjusted=1,
+            checks={},
+        )
     if _gate_decision is not None:
         _gate_state["last"] = _gate_decision.to_json()
         if not _gate_decision.allowed:
@@ -841,6 +883,7 @@ def main() -> int:
     tracker_mkt = KXBTCMarketTracker(client)
     pair_tracker = PairTracker()
     risk = PairRiskManager(pair_cap_cents=args.pair_cap, budget_cents=2500)
+    _GATE_RISK_HOLDER["risk"] = risk
 
     active_pairs: dict[str, ActivePairExecution] = {}
     order_to_ticker: dict[str, str] = {}

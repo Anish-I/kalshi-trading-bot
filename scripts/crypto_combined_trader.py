@@ -25,9 +25,22 @@ from engine.alerts import alert_trade_placed, alert_settlement
 from engine.pair_pricing import evaluate_pair_opportunity, extract_book_from_orderbook
 from engine.pair_state import PairTracker
 from engine.pair_risk import PairRiskManager
-from engine.pre_trade_gate import PreTradeGate, GateContext
+from engine.pre_trade_gate import PreTradeGate, GateContext, GateDecision
 from engine.risk import RiskManager
 from engine.family_limits import FamilyLimits
+from engine.gate_risk_adapter import RiskManagerAdapter, FamilyLimitsAdapter
+
+
+def _compute_session_tag(now_utc: datetime) -> str:
+    h = now_utc.hour
+    if 13 <= h <= 20:
+        return "us_core"
+    elif 7 <= h <= 12:
+        return "eu_core"
+    elif 0 <= h <= 6:
+        return "asia_core"
+    else:
+        return "overnight"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", choices=["sim", "live"], default="sim")
@@ -72,6 +85,17 @@ SCAN_INTERVAL = 15  # scan every 15s to catch spread windows faster
 # BTC/ETH/SOL/XRP have 1-3c avg spreads → 80%+ orphan rate, net negative.
 # Pair trading disabled — 100% orphan rate across all series, net negative P&L
 PAIR_ENABLED_SERIES: set[str] = set()  # empty = no pairs
+
+# DO NOT REMOVE — blocks accidental pair re-enablement while the orphan unwind
+# is a linear best-effort flow instead of a proper state machine. Codex review
+# 2026-04-08 flagged that the current cancel -> flatten -> resolve_orphan sequence
+# releases exposure before exchange state is terminal. Lift this assert only
+# after scripts/crypto_combined_trader.py::_orphan_unwind is rewritten as a
+# proper state machine with persistent order-id tracking.
+ORPHAN_UNWIND_STATE_MACHINE_SHIPPED = False
+assert PAIR_ENABLED_SERIES == set() or ORPHAN_UNWIND_STATE_MACHINE_SHIPPED, (
+    "pairs cannot be enabled until the orphan unwind state machine ships"
+)
 
 # Per-series orphan timeouts (seconds) — raised to 60s to allow fills on thin books
 ORPHAN_TIMEOUT = {
@@ -259,13 +283,23 @@ pair_tracker = PairTracker()
 pair_risk = PairRiskManager(pair_cap_cents=args.pair_cap, budget_cents=5000)
 
 # Phase 1b: unified pre-trade gate (additive — existing inline checks remain authoritative).
-_GATE_RISK_MGR = RiskManager(
-    max_contracts=10_000,
-    daily_loss_limit_cents=10_000_000,
-    consecutive_loss_halt=10_000,
-)
-_GATE_FAMILY_LIMITS = FamilyLimits()
-_GATE_FAMILY_LIMITS._cooldown_s = 0.0
+def _combined_can_trade() -> tuple[bool, str]:
+    halt, reason = trailing_stop.should_halt()
+    if halt:
+        return False, f"trailing_stop:{reason}"
+    return True, "ok"
+
+
+def _crypto_family_exposure(_family: str) -> int:
+    return int(pair_risk.exposure_cents)
+
+
+def _crypto_family_budget(_family: str) -> int:
+    return int(pair_risk.budget_cents)
+
+
+_GATE_RISK_MGR = RiskManagerAdapter(_combined_can_trade, max_contracts=int(ML_MAX_CONTRACTS))
+_GATE_FAMILY_LIMITS = FamilyLimitsAdapter(_crypto_family_exposure, _crypto_family_budget)
 from engine.family_scorecard import FamilyScorecard as _FamilyScorecard
 _scorecard = _FamilyScorecard(
     window_hours=settings.SCORECARD_WINDOW_HOURS,
@@ -417,6 +451,9 @@ while True:
                         no_ask = float(market.get("no_ask_dollars", 0) or 0)
 
                         # Get real prices from orderbook
+                        _ml_quote_fetch_ts = time.monotonic()
+                        yb = []
+                        nb = []
                         try:
                             ob = client.get_orderbook(ticker, depth=3)
                             fp = ob.get("orderbook_fp", {})
@@ -441,27 +478,48 @@ while True:
                             if edge > ML_MIN_EDGE:
                                 ml_action = "trading"
 
-                                # Phase 1b: pre-trade gate
+                                # Bids from orderbook fetch above (fp[0] is best bid level).
                                 try:
-                                    _ml_gate_ctx = GateContext(
-                                        ticker=ticker,
-                                        family=_series_to_family(series),
-                                        side=ml_side,
-                                        entry_cents=int(entry_cents),
-                                        contracts=int(ML_MAX_CONTRACTS),
-                                        yes_ask=float(yes_ask or 0),
-                                        no_ask=float(no_ask or 0),
-                                        model_prob=0.5,
-                                        quote_age_s=0.0,
-                                        max_stale_s=60.0,
-                                        session_tag="any",
-                                        strategy_tag="combined_ml",
-                                        calibration_artifact=None,
-                                    )
-                                    _ml_gate_decision = _pre_trade_gate.evaluate(_ml_gate_ctx)
+                                    _yes_bid_dollars = float(yb[0][0]) if yb else 0.0
+                                    _no_bid_dollars = float(nb[0][0]) if nb else 0.0
                                 except Exception:
-                                    log.exception("pre_trade_gate (ml) eval error — proceeding")
-                                    _ml_gate_decision = None
+                                    _yes_bid_dollars = 0.0
+                                    _no_bid_dollars = 0.0
+
+                                # Phase 1b: pre-trade gate
+                                _ml_gate_ctx = GateContext(
+                                    ticker=ticker,
+                                    family=_series_to_family(series),
+                                    side=ml_side,
+                                    entry_cents=int(entry_cents),
+                                    contracts=int(ML_MAX_CONTRACTS),
+                                    yes_ask=float(yes_ask or 0),
+                                    no_ask=float(no_ask or 0),
+                                    yes_bid=_yes_bid_dollars,
+                                    no_bid=_no_bid_dollars,
+                                    model_prob=0.5,
+                                    quote_age_s=float(time.monotonic() - _ml_quote_fetch_ts),
+                                    max_stale_s=60.0,
+                                    session_tag=_compute_session_tag(now),
+                                    strategy_tag="combined_ml",
+                                    calibration_artifact=None,
+                                )
+                                try:
+                                    _ml_gate_decision = _pre_trade_gate.evaluate(_ml_gate_ctx)
+                                except Exception as _gate_exc:
+                                    log.error(
+                                        "GATE_EXCEPTION ticker=%s strategy=combined_ml mode=%s",
+                                        ticker, args.mode, exc_info=True,
+                                    )
+                                    if args.mode == "live":
+                                        continue
+                                    _ml_gate_decision = GateDecision(
+                                        allowed=True,
+                                        reason_code="gate_exception_sim_fail_open",
+                                        reason_detail=f"exception ignored in sim: {type(_gate_exc).__name__}",
+                                        contracts_adjusted=int(ML_MAX_CONTRACTS),
+                                        checks={},
+                                    )
                                 if _ml_gate_decision is not None:
                                     _gate_state["last"] = _ml_gate_decision.to_json()
                                     if not _ml_gate_decision.allowed:
@@ -513,6 +571,7 @@ while True:
             # STRATEGY 2: PAIR MAKER
             # ============================================================
             if ticker not in traded_tickers_pair and ticker not in traded_tickers_ml:
+                _pair_quote_fetch_ts = time.monotonic()
                 try:
                     ob = client.get_orderbook(ticker, depth=5)
                 except Exception:
@@ -546,26 +605,39 @@ while True:
                             mnet = opp["maker_net"]
 
                             # Phase 1b: pre-trade gate (covers both YES + NO legs)
+                            _pair_gate_ctx = GateContext(
+                                ticker=ticker,
+                                family=_series_to_family(series),
+                                side="yes",
+                                entry_cents=int(my),
+                                contracts=int(pair_size_check),
+                                yes_ask=float(my) / 100.0,
+                                no_ask=float(mn) / 100.0,
+                                yes_bid=float(book.get("best_yes_bid", 0) or 0) / 100.0,
+                                no_bid=float(book.get("best_no_bid", 0) or 0) / 100.0,
+                                model_prob=0.5,
+                                quote_age_s=float(time.monotonic() - _pair_quote_fetch_ts),
+                                max_stale_s=60.0,
+                                session_tag=_compute_session_tag(now),
+                                strategy_tag="combined_pair",
+                                calibration_artifact=None,
+                            )
                             try:
-                                _pair_gate_ctx = GateContext(
-                                    ticker=ticker,
-                                    family=_series_to_family(series),
-                                    side="yes",
-                                    entry_cents=int(my),
-                                    contracts=int(pair_size_check),
-                                    yes_ask=float(my) / 100.0,
-                                    no_ask=float(mn) / 100.0,
-                                    model_prob=0.5,
-                                    quote_age_s=0.0,
-                                    max_stale_s=60.0,
-                                    session_tag="any",
-                                    strategy_tag="combined_pair",
-                                    calibration_artifact=None,
-                                )
                                 _pair_gate_decision = _pre_trade_gate.evaluate(_pair_gate_ctx)
-                            except Exception:
-                                log.exception("pre_trade_gate (pair) eval error — proceeding")
-                                _pair_gate_decision = None
+                            except Exception as _gate_exc:
+                                log.error(
+                                    "GATE_EXCEPTION ticker=%s strategy=combined_pair mode=%s",
+                                    ticker, args.mode, exc_info=True,
+                                )
+                                if args.mode == "live":
+                                    continue
+                                _pair_gate_decision = GateDecision(
+                                    allowed=True,
+                                    reason_code="gate_exception_sim_fail_open",
+                                    reason_detail=f"exception ignored in sim: {type(_gate_exc).__name__}",
+                                    contracts_adjusted=int(pair_size_check),
+                                    checks={},
+                                )
                             if _pair_gate_decision is not None:
                                 _gate_state["last"] = _pair_gate_decision.to_json()
                                 if not _pair_gate_decision.allowed:

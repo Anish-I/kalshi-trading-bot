@@ -55,9 +55,10 @@ from engine.crypto_decision import (
 )
 from engine.session_tags import get_session_tag, is_live_session
 from engine.alerts import alert_trade_placed, alert_settlement, alert_risk_halt
-from engine.pre_trade_gate import PreTradeGate, GateContext
+from engine.pre_trade_gate import PreTradeGate, GateContext, GateDecision
 from engine.risk import RiskManager
 from engine.family_limits import FamilyLimits
+from engine.gate_risk_adapter import RiskManagerAdapter, FamilyLimitsAdapter
 
 _log_file = "crypto_sim.log" if _pre_parsed.simulate else "crypto_live.log"
 logging.basicConfig(
@@ -99,13 +100,27 @@ STATE_FILE = Path(settings.DATA_DIR) / "ml_trader_state.json"
 # Phase 1b: unified pre-trade gate.  Permissive defaults so the gate is purely
 # additive — existing inline checks (edge, agreement, entry price cap) keep
 # their authority; the gate adds a machine-readable reason code on top.
-_GATE_RISK_MGR = RiskManager(
-    max_contracts=10_000,
-    daily_loss_limit_cents=10_000_000,
-    consecutive_loss_halt=10_000,
-)
-_GATE_FAMILY_LIMITS = FamilyLimits()
-_GATE_FAMILY_LIMITS._cooldown_s = 0.0  # disable cooldown — traders enforce their own pacing
+def _ml_can_trade() -> tuple[bool, str]:
+    # Read live daily_pnl / loss limit globals (not frozen at module init).
+    _dp = globals().get("daily_pnl", 0)
+    _limit = globals().get("DAILY_LOSS_LIMIT_CENTS", 10_000_000)
+    if _dp <= -_limit:
+        return False, f"daily_loss_limit: pnl={_dp}c <= -{_limit}c"
+    return True, "ok"
+
+
+# No per-family exposure tracking in ml_trader — use always-pass adapter with
+# an effectively unlimited budget. Inline checks retain authority over sizing.
+def _ml_family_exposure(_family: str) -> int:
+    return 0
+
+
+def _ml_family_budget(_family: str) -> int:
+    return 10_000_000
+
+
+_GATE_RISK_MGR = RiskManagerAdapter(_ml_can_trade, max_contracts=int(MAX_CONTRACTS))
+_GATE_FAMILY_LIMITS = FamilyLimitsAdapter(_ml_family_exposure, _ml_family_budget)
 from engine.family_scorecard import FamilyScorecard as _FamilyScorecard
 from config.settings import settings as _scorecard_settings
 _scorecard = _FamilyScorecard(
@@ -428,6 +443,7 @@ def main():
                 trade_count = 0
                 last_reset_date = today
 
+            quote_fetch_ts = time.monotonic()
             market = tracker.get_next_market()
             if not market:
                 write_state({"time": datetime.now(timezone.utc).isoformat(), "status": "no_market"})
@@ -436,9 +452,10 @@ def main():
 
             remaining = tracker.get_market_time_remaining(market)
             ticker = market["ticker"]
-            yes_ask = float(market.get("yes_ask_dollars", 0))
-            no_ask = float(market.get("no_ask_dollars", 0))
-            yes_bid = float(market.get("yes_bid_dollars", 0))
+            yes_ask = float(market.get("yes_ask_dollars", market.get("yes_ask", 0)) or 0)
+            no_ask = float(market.get("no_ask_dollars", market.get("no_ask", 0)) or 0)
+            yes_bid = float(market.get("yes_bid_dollars", market.get("yes_bid", 0)) or 0)
+            no_bid = float(market.get("no_bid_dollars", market.get("no_bid", 0)) or 0)
             btc = get_btc_price()
             market_mid = (yes_bid + yes_ask) / 2 if yes_ask > 0 else 0.5
 
@@ -669,26 +686,42 @@ def main():
             gate_reason_code_kw: str | None = None
             gate_checks_json_kw: str | None = None
             if action == "trading" and side:
+                gate_ctx = GateContext(
+                    ticker=ticker,
+                    family="btc_15m",
+                    side=side,
+                    entry_cents=int(entry_price_cents or 0),
+                    contracts=MAX_CONTRACTS,
+                    yes_ask=float(yes_ask or 0),
+                    no_ask=float(no_ask or 0),
+                    yes_bid=float(yes_bid or 0),
+                    no_bid=float(no_bid or 0),
+                    model_prob=float(calibrated_p_win) if calibrated_p_win is not None else 0.5,
+                    quote_age_s=float(time.monotonic() - quote_fetch_ts),
+                    max_stale_s=60.0,
+                    session_tag=session or "any",
+                    strategy_tag="ml",
+                    calibration_artifact=calibration if calibration.get("exists") else None,
+                )
                 try:
-                    gate_ctx = GateContext(
-                        ticker=ticker,
-                        family="btc_15m",
-                        side=side,
-                        entry_cents=int(entry_price_cents or 0),
-                        contracts=MAX_CONTRACTS,
-                        yes_ask=float(yes_ask or 0),
-                        no_ask=float(no_ask or 0),
-                        model_prob=float(calibrated_p_win) if calibrated_p_win is not None else 0.5,
-                        quote_age_s=0.0,
-                        max_stale_s=60.0,
-                        session_tag=session or "any",
-                        strategy_tag="ml",
-                        calibration_artifact=calibration if calibration.get("exists") else None,
-                    )
                     gate_decision = _pre_trade_gate.evaluate(gate_ctx)
-                except Exception:
-                    log.exception("pre_trade_gate eval error — proceeding with inline checks only")
-                    gate_decision = None
+                except Exception as _gate_exc:
+                    log.error(
+                        "GATE_EXCEPTION ticker=%s strategy=ml sim=%s",
+                        ticker, effective_simulate, exc_info=True,
+                    )
+                    if not effective_simulate:
+                        # live: fail closed — skip this trade entirely
+                        action = "gate_exception_fail_closed"
+                        gate_decision = None
+                    else:
+                        gate_decision = GateDecision(
+                            allowed=True,
+                            reason_code="gate_exception_sim_fail_open",
+                            reason_detail=f"exception ignored in sim: {type(_gate_exc).__name__}",
+                            contracts_adjusted=int(MAX_CONTRACTS),
+                            checks={},
+                        )
                 if gate_decision is not None:
                     _gate_state["last"] = gate_decision.to_json()
                     gate_reason_code_kw = gate_decision.reason_code
