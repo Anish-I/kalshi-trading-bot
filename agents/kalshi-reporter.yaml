@@ -1,0 +1,7 @@
+name: kalshi-reporter
+version: 0.1.0
+model: claude-sonnet-4-6
+system_prompt_path: kalshi-reporter.system.md
+common_header_path: _common/system_prompt_header.md
+tools:
+  - type: agent_toolset_20260401

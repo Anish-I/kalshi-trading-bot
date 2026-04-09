@@ -36,3 +36,9 @@ Thumbs.db
 # Logs
 logs/
 *.log
+
+# Managed Agents runtime artifacts
+agents/.deployed.json
+agents/.last_run.json
+agents/.usage.jsonl
+tmp_snapshot*.tar.gz
