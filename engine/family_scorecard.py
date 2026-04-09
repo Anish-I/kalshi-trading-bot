@@ -177,13 +177,7 @@ class FamilyScorecard:
         if orphans + completed > 0:
             orphan_rate = float(orphans / max(1, completed + orphans))
         else:
-            # fallback: proxy via journal gate_reason_code
-            if not j_fam.empty and "gate_reason_code" in j_fam.columns:
-                total = len(j_fam)
-                bad = int((j_fam["gate_reason_code"] == "bucket_not_tradable").sum())
-                orphan_rate = float(bad / total) if total > 0 else 0.0
-            else:
-                orphan_rate = 0.0
+            orphan_rate = 0.0  # no real orphan data; assume healthy
 
         return {
             "trade_count": trade_count,
