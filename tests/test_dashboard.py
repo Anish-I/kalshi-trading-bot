@@ -141,3 +141,92 @@ def test_api_families_with_data(tmp_path, monkeypatch):
     match = [f for f in body["families"] if f["family"] == fam_name]
     assert match, f"expected family {fam_name} in response"
     assert match[0]["metrics"]["trade_count"] >= 2
+
+
+# -----------------------------------------------------------------------------
+# Phase A — agents + proposals endpoints
+# -----------------------------------------------------------------------------
+
+def _write_fake_proposal(root: Path, pid: str, state: str = "pending") -> Path:
+    d = root / state
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{pid}.json"
+    p.write_text(json.dumps({
+        "id": pid,
+        "state": state,
+        "agent": "weather-strategist",
+        "agent_version": "0.2.0",
+        "created_at": "2026-04-09T00:00:00+00:00",
+        "snapshot_hash": "deadbeef",
+        "current_config": {"ENTRY_PRICE_MIN_CENTS": 0},
+        "proposed_config": {"ENTRY_PRICE_MIN_CENTS": 5},
+        "rationale": "test",
+        "success_criteria_snapshot": {},
+        "git_patch": "",
+        "codex_review": {"verdict": "approve", "reasoning": "ok"},
+        "human_decision": None,
+        "applied_at": None,
+        "applied_commit": None,
+    }))
+    return p
+
+
+def test_api_agents_lists_weather_strategist():
+    r = client.get("/api/agents")
+    assert r.status_code == 200
+    names = [a["name"] for a in r.json()["agents"]]
+    assert "weather-strategist" in names
+
+
+def test_api_agent_config_returns_writable_keys():
+    r = client.get("/api/agents/weather-strategist/config")
+    assert r.status_code == 200
+    body = r.json()
+    assert "current_config" in body
+    assert "writable_config_keys" in body
+
+
+def test_api_agent_config_unknown_404():
+    r = client.get("/api/agents/no-such-agent/config")
+    assert r.status_code == 404
+
+
+def test_api_proposals_list_and_get(tmp_path, monkeypatch):
+    import dashboard.app as da
+    monkeypatch.setattr(da, "_AGENT_PROPOSAL_ROOT", tmp_path)
+    _write_fake_proposal(tmp_path, "pendprop1", state="pending")
+    r = client.get("/api/proposals?state=pending")
+    assert r.status_code == 200
+    items = r.json()["proposals"]
+    assert any(i["id"] == "pendprop1" for i in items)
+
+    r = client.get("/api/proposals/pendprop1")
+    assert r.status_code == 200
+    assert r.json()["id"] == "pendprop1"
+
+    r = client.get("/api/proposals/nope")
+    assert r.status_code == 404
+
+
+def test_api_proposals_approve_moves_file(tmp_path, monkeypatch):
+    import dashboard.app as da
+    monkeypatch.setattr(da, "_AGENT_PROPOSAL_ROOT", tmp_path)
+    _write_fake_proposal(tmp_path, "appr1", state="pending")
+    r = client.post("/api/proposals/appr1/approve")
+    assert r.status_code == 200
+    assert (tmp_path / "approved" / "appr1.json").exists()
+    assert not (tmp_path / "pending" / "appr1.json").exists()
+
+
+def test_api_proposals_reject_moves_file(tmp_path, monkeypatch):
+    import dashboard.app as da
+    monkeypatch.setattr(da, "_AGENT_PROPOSAL_ROOT", tmp_path)
+    _write_fake_proposal(tmp_path, "rej1", state="pending")
+    r = client.post("/api/proposals/rej1/reject?reason=bad")
+    assert r.status_code == 200
+    assert (tmp_path / "rejected" / "rej1.json").exists()
+
+
+def test_api_proposals_invalid_state():
+    r = client.get("/api/proposals?state=bogus")
+    assert r.status_code == 400

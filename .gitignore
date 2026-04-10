@@ -42,3 +42,6 @@ agents/.deployed.json
 agents/.last_run.json
 agents/.usage.jsonl
 tmp_snapshot*.tar.gz
+
+# Phase A — agent proposals & workdirs
+.agent_work/

@@ -143,6 +143,11 @@ td { padding:3px 5px; border-bottom:1px solid #0d1219; }
     <div class="ptitle">Infrastructure</div>
     <div id="infra-panel">Loading...</div>
   </div>
+  <div class="panel" style="grid-column:1/-1">
+    <div class="ptitle">Agent Proposals</div>
+    <div id="agent-proposals">Loading...</div>
+    <div id="agent-proposal-detail" style="margin-top:8px"></div>
+  </div>
 </div>
 
 <div class="footer">
@@ -361,6 +366,47 @@ async function refresh(){
   }catch(e){console.error(e)}
 }
 refresh();setInterval(refresh,10000);
+
+// ---------- Phase A: Agent Proposals ----------
+async function loadProposals(state){
+  state = state || 'pending';
+  try{
+    const r = await fetch('/api/proposals?state='+encodeURIComponent(state));
+    const body = await r.json();
+    const host = document.getElementById('agent-proposals');
+    if(!host) return;
+    if(!body.proposals || !body.proposals.length){
+      host.innerHTML = '<div style="color:var(--text-dim);font-size:11px">no '+state+' proposals</div>';
+      return;
+    }
+    let html = '<table style="width:100%;font-size:11px;border-collapse:collapse">';
+    html += '<tr style="color:var(--text-dim)"><th align=left>id</th><th align=left>agent</th><th align=left>codex</th><th align=left>created</th><th></th></tr>';
+    for(const p of body.proposals){
+      html += '<tr><td>'+p.id+'</td><td>'+p.agent+'</td><td>'+(p.codex_verdict||'')+'</td><td>'+p.created_at+'</td>';
+      html += '<td><button onclick="viewProposal(\''+p.id+'\')">view</button> <button onclick="approveProposal(\''+p.id+'\')">approve</button> <button onclick="rejectProposal(\''+p.id+'\')">reject</button></td>';
+      html += '</tr>';
+    }
+    html += '</table>';
+    host.innerHTML = html;
+  }catch(e){console.error(e)}
+}
+async function viewProposal(id){
+  const r = await fetch('/api/proposals/'+encodeURIComponent(id));
+  const obj = await r.json();
+  const host = document.getElementById('agent-proposal-detail');
+  if(!host) return;
+  host.innerHTML = '<h4>'+id+'</h4><div>codex: '+(obj.codex_review && obj.codex_review.verdict)+'</div><div>'+(obj.rationale||'')+'</div><pre style="max-height:240px;overflow:auto;background:#111;padding:6px;font-size:10px">'+(obj.git_patch||'(no patch)')+'</pre>';
+}
+async function approveProposal(id){
+  await fetch('/api/proposals/'+encodeURIComponent(id)+'/approve',{method:'POST'});
+  loadProposals('pending');
+}
+async function rejectProposal(id){
+  const reason = prompt('reject reason?') || '';
+  await fetch('/api/proposals/'+encodeURIComponent(id)+'/reject?reason='+encodeURIComponent(reason),{method:'POST'});
+  loadProposals('pending');
+}
+if(document.getElementById('agent-proposals')){loadProposals('pending');setInterval(()=>loadProposals('pending'),30000);}
 </script>
 </body>
 </html>

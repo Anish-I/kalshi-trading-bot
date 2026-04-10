@@ -428,3 +428,173 @@ def get_logs():
         pass
 
     return {"crypto": crypto_state, "weather": weather_state, "notification": notification, "paper_trades": paper_trades}
+
+
+# -----------------------------------------------------------------------------
+# Phase A — Agents + proposals endpoints
+# -----------------------------------------------------------------------------
+
+import os as _os
+import re as _re
+from fastapi import HTTPException as _HTTPException
+
+_AGENT_PROPOSAL_ROOT = Path(
+    _os.environ.get("KALSHI_AGENT_PROPOSAL_ROOT", "D:/kalshi-data/agent_proposals")
+)
+_AGENTS_DIR = Path(__file__).resolve().parent.parent / "agents"
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_agent_yaml(path: Path) -> dict:
+    try:
+        import yaml  # type: ignore
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        try:
+            from scripts.agents.orchestrator import _tiny_yaml  # type: ignore
+            return _tiny_yaml(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+
+@app.get("/api/agents")
+def list_agents():
+    """List all agent YAMLs under agents/ with their metadata."""
+    out = []
+    if not _AGENTS_DIR.exists():
+        return {"agents": []}
+    for p in sorted(_AGENTS_DIR.glob("*.yaml")):
+        try:
+            cfg = _load_agent_yaml(p)
+            out.append({
+                "name": cfg.get("name", p.stem),
+                "version": cfg.get("version", ""),
+                "authority_class": cfg.get("authority_class", "reporter"),
+                "writable_config_keys": cfg.get("writable_config_keys") or [],
+                "path": str(p.relative_to(_REPO_ROOT)),
+            })
+        except Exception:
+            continue
+    return {"agents": out}
+
+
+@app.get("/api/agents/{name}/config")
+def agent_config(name: str):
+    """Return current live values of this agent's writable_config_keys."""
+    path = _AGENTS_DIR / f"{name}.yaml"
+    if not path.exists():
+        raise _HTTPException(status_code=404, detail="agent not found")
+    cfg = _load_agent_yaml(path)
+    keys = cfg.get("writable_config_keys") or []
+    current: dict = {}
+    for entry in keys:
+        if not isinstance(entry, dict):
+            continue
+        module = entry.get("module")
+        key = entry.get("key")
+        default = entry.get("default")
+        if not module or not key:
+            continue
+        mod_path = _REPO_ROOT / module
+        val = default
+        if mod_path.exists():
+            try:
+                text = mod_path.read_text(encoding="utf-8")
+                m = _re.search(rf"^\s*{_re.escape(key)}\s*=\s*(.+)$", text, _re.MULTILINE)
+                if m:
+                    raw = m.group(1).split("#", 1)[0].strip().rstrip(",")
+                    try:
+                        val = int(raw)
+                    except ValueError:
+                        try:
+                            val = float(raw)
+                        except ValueError:
+                            val = raw.strip("'\"")
+            except Exception:
+                pass
+        current[key] = val
+    return {"agent": name, "current_config": current, "writable_config_keys": keys}
+
+
+def _proposals_dir(state: str) -> Path:
+    return _AGENT_PROPOSAL_ROOT / state
+
+
+@app.get("/api/proposals")
+def list_proposals(state: str = "pending"):
+    """List proposals in pending|approved|rejected|applied state."""
+    if state not in ("pending", "approved", "rejected", "applied"):
+        raise _HTTPException(status_code=400, detail="invalid state")
+    d = _proposals_dir(state)
+    items = []
+    if d.exists():
+        for p in sorted(d.glob("*.json")):
+            try:
+                obj = json.loads(p.read_text(encoding="utf-8"))
+                items.append({
+                    "id": obj.get("id", p.stem),
+                    "agent": obj.get("agent", ""),
+                    "created_at": obj.get("created_at", ""),
+                    "codex_verdict": (obj.get("codex_review") or {}).get("verdict", ""),
+                    "state": obj.get("state", state),
+                })
+            except Exception:
+                continue
+    return {"state": state, "proposals": items}
+
+
+@app.get("/api/proposals/{proposal_id}")
+def get_proposal(proposal_id: str):
+    """Return full proposal JSON including codex review."""
+    for state in ("pending", "approved", "rejected", "applied"):
+        p = _proposals_dir(state) / f"{proposal_id}.json"
+        if p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                raise _HTTPException(status_code=500, detail="proposal JSON corrupt")
+    raise _HTTPException(status_code=404, detail="proposal not found")
+
+
+def _move_proposal(proposal_id: str, src: str, dst: str, mutate: dict | None = None) -> dict:
+    src_path = _proposals_dir(src) / f"{proposal_id}.json"
+    if not src_path.exists():
+        raise _HTTPException(status_code=404, detail=f"proposal not found in {src}")
+    try:
+        obj = json.loads(src_path.read_text(encoding="utf-8"))
+    except Exception:
+        raise _HTTPException(status_code=500, detail="proposal JSON corrupt")
+    obj["state"] = dst
+    if mutate:
+        obj.update(mutate)
+    dst_dir = _proposals_dir(dst)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    (dst_dir / f"{proposal_id}.json").write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    try:
+        src_path.unlink()
+    except Exception:
+        pass
+    return obj
+
+
+@app.post("/api/proposals/{proposal_id}/approve")
+def approve_proposal(proposal_id: str):
+    obj = _move_proposal(
+        proposal_id, "pending", "approved",
+        mutate={"human_decision": {"action": "approve", "at": _now_iso()}},
+    )
+    return {"ok": True, "proposal": obj}
+
+
+@app.post("/api/proposals/{proposal_id}/reject")
+def reject_proposal(proposal_id: str, reason: str = ""):
+    obj = _move_proposal(
+        proposal_id, "pending", "rejected",
+        mutate={"human_decision": {"action": "reject", "reason": reason, "at": _now_iso()}},
+    )
+    return {"ok": True, "proposal": obj}
+
+
+def _now_iso() -> str:
+    from datetime import datetime as _dt, timezone as _tz
+    return _dt.now(_tz.utc).isoformat()

@@ -221,6 +221,101 @@ def run_headless_reporter(
         return 0
 
 
+def run_strategist(
+    *,
+    agent_name: str,
+    agent_cfg: dict,
+    output_dir: Path,
+    timeout_s: int = 900,
+    model: str = DEFAULT_MODEL,
+) -> tuple[dict | None, dict]:
+    """Invoke claude -p as a strategist agent. Returns (proposal_dict, meta).
+
+    This shares the subprocess plumbing with run_headless_reporter but uses
+    a strategist system prompt and expects the model to emit a JSON block
+    wrapped in <proposal>...</proposal>.
+
+    NOTE: This function is the real-path stub for Phase A. It's imported
+    lazily by the orchestrator; test suites use --mock-claude to bypass it.
+    """
+    started = datetime.now(timezone.utc)
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    system_prompt_path = AGENTS_DIR / agent_cfg.get(
+        "system_prompt_path", f"{agent_name}.system.md"
+    )
+    if not system_prompt_path.exists():
+        return None, {"error": f"system prompt missing: {system_prompt_path}"}
+
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        return None, {"error": "claude CLI not on PATH"}
+
+    system_text = system_prompt_path.read_text(encoding="utf-8")
+    common_header = AGENTS_DIR / agent_cfg.get("common_header_path", "_common/system_prompt_header.md")
+    strategist_header = AGENTS_DIR / agent_cfg.get("strategist_header_path", "_common/strategist_header.md")
+    prefix_parts = []
+    for p in (common_header, strategist_header):
+        if p.exists():
+            prefix_parts.append(p.read_text(encoding="utf-8"))
+    system_full = "\n\n".join(prefix_parts + [system_text])
+
+    user_prompt = (
+        f"Run your strategist task per the system prompt. Write the proposal JSON "
+        f"wrapped in <proposal>...</proposal> as your final message and stop."
+    )
+
+    cmd = [
+        claude_bin, "-p",
+        "--permission-mode", "acceptEdits",
+        "--model", model,
+        "--allowedTools", "Read,Write,Bash",
+        "--add-dir", str(output_dir),
+        "--append-system-prompt", system_full,
+        "--no-session-persistence",
+        "--output-format", "json",
+        user_prompt,
+    ]
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=os.environ.copy())
+    except subprocess.TimeoutExpired:
+        return None, {"error": "timeout", "elapsed_s": timeout_s}
+
+    meta = {
+        "exit_code": proc.returncode,
+        "elapsed_s": (datetime.now(timezone.utc) - started).total_seconds(),
+    }
+    if proc.returncode != 0:
+        meta["stderr_tail"] = (proc.stderr or "")[-500:]
+        return None, meta
+
+    # Parse stdout — claude --output-format=json returns one object whose `result`
+    # field contains the final assistant message.
+    try:
+        result_obj = json.loads(proc.stdout)
+        final_text = (
+            result_obj.get("result")
+            or result_obj.get("text")
+            or ""
+        )
+    except Exception:
+        final_text = proc.stdout or ""
+
+    import re as _re
+    m = _re.search(r"<proposal>(.*?)</proposal>", final_text, _re.DOTALL)
+    if not m:
+        meta["error"] = "no <proposal> block in claude output"
+        return None, meta
+    try:
+        proposal = json.loads(m.group(1).strip())
+    except json.JSONDecodeError as e:
+        meta["error"] = f"proposal JSON decode failed: {e}"
+        return None, meta
+    return proposal, meta
+
+
 def main() -> int:
     import argparse
 
