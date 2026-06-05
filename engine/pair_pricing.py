@@ -13,12 +13,17 @@ Pair strategy requires MAKER on at least one leg.
 
 import logging
 
+from engine.fees import kalshi_fee_cents, pair_fee_cents
+
 logger = logging.getLogger(__name__)
 
-# Kalshi fees (approximate — actual fees are variable by price/size)
-# TODO: VERIFY — codex flagged that Kalshi charges maker fees on executed resting orders; PDF fetch failed, manual verification needed
+# Legacy flat-fee constants, retained for backward compatibility with callers
+# and tests that import them. Real fees are price-dependent and maker-aware —
+# prefer engine.fees.kalshi_fee_cents / pair_fee_cents for new code.
+# These approximate a maker pair near mid (2 legs x ~1c rounded) so existing
+# pair math stays conservative; the precise figure now comes from the helpers.
 FEE_PER_CONTRACT_PER_SIDE_CENTS = 1.07
-PAIR_FEE_CENTS = FEE_PER_CONTRACT_PER_SIDE_CENTS * 2  # ~2.14c total
+PAIR_FEE_CENTS = pair_fee_cents(50, 50, contracts=1)  # maker both legs near mid
 
 
 def pair_cost_cents(yes_ask_cents: int, no_ask_cents: int) -> int:
@@ -32,8 +37,13 @@ def pair_gross_profit_cents(yes_ask_cents: int, no_ask_cents: int) -> int:
 
 
 def pair_net_profit_cents(yes_ask_cents: int, no_ask_cents: int) -> float:
-    """Net profit per pair after fees."""
-    return pair_gross_profit_cents(yes_ask_cents, no_ask_cents) - PAIR_FEE_CENTS
+    """Net profit per pair after fees.
+
+    Fees are the real price-dependent Kalshi maker fees on each leg (the only
+    viable pair execution is maker), not a flat constant.
+    """
+    fee = pair_fee_cents(yes_ask_cents, no_ask_cents, contracts=1)
+    return pair_gross_profit_cents(yes_ask_cents, no_ask_cents) - fee
 
 
 def is_pair_profitable(yes_ask_cents: int, no_ask_cents: int, min_net_cents: float = 1.0) -> bool:
@@ -113,11 +123,18 @@ def evaluate_pair_opportunity(
     taker_cost = book["taker_pair_cost"]
     maker_cost = book["maker_pair_cost"]
     maker_gross = 100 - maker_cost
-    maker_net = maker_gross - PAIR_FEE_CENTS
+    # Price-dependent maker fees on the actual maker fill prices.
+    maker_fee = pair_fee_cents(
+        book["maker_yes_price"], book["maker_no_price"], contracts=1
+    )
+    maker_net = maker_gross - maker_fee
 
-    # Taker arb (crossing both asks) — should never be profitable
+    # Taker arb (crossing both asks) — should never be profitable.
     taker_gross = 100 - taker_cost
-    taker_arb = taker_cost > 0 and taker_cost <= pair_cap_cents and taker_gross > PAIR_FEE_CENTS
+    taker_fee = pair_fee_cents(
+        book["implied_yes_ask"], book["implied_no_ask"], contracts=1, maker=False
+    )
+    taker_arb = taker_cost > 0 and taker_cost <= pair_cap_cents and taker_gross > taker_fee
 
     # Maker opportunity (posting limits)
     maker_tradeable = maker_cost > 0 and maker_cost <= pair_cap_cents and maker_net >= min_maker_net
@@ -146,7 +163,7 @@ def evaluate_pair_opportunity(
         "no_ask_cents": book["implied_no_ask"],
         "pair_cost_cents": taker_cost,
         "gross_profit_cents": taker_gross,
-        "net_profit_cents": round(taker_gross - PAIR_FEE_CENTS, 2),
+        "net_profit_cents": round(taker_gross - taker_fee, 2),
         "tradeable": maker_tradeable,
         "max_pairs": min(book["best_yes_bid_qty"], book["best_no_bid_qty"]),
     }

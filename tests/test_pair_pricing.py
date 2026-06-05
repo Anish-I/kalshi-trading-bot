@@ -25,8 +25,9 @@ def test_pair_gross_profit():
 
 
 def test_pair_net_profit():
+    # Real price-dependent maker fees: yes@40 + no@50 maker = 1c + 1c = 2c.
     net = pair_net_profit_cents(40, 50)
-    assert net == pytest.approx(10 - 2.14, abs=0.01)
+    assert net == pytest.approx(10 - 2.0, abs=0.01)
 
 
 def test_is_profitable():
