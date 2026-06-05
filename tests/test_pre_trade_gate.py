@@ -186,3 +186,80 @@ def test_to_json_roundtrip():
     assert js["allowed"] is True
     assert js["reason_code"] == "ok"
     assert "checks" in js and isinstance(js["checks"], dict)
+
+
+# ---------------------------------------------------------------------- #
+# require_calibration (fail-closed) — the live-path smoking-gun fix
+# ---------------------------------------------------------------------- #
+
+
+def test_require_calibration_blocks_when_missing():
+    """A directional bet with require_calibration must FAIL CLOSED if absent."""
+    gate = PreTradeGate(_ok_risk(), _ok_family())
+    decision = gate.evaluate(
+        _make_ctx(calibration_artifact=None, require_calibration=True)
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "calibration_missing"
+
+
+def test_require_calibration_blocks_when_artifact_not_exists():
+    gate = PreTradeGate(_ok_risk(), _ok_family())
+    bad = {"exists": False, "rows_by_key": {}}
+    decision = gate.evaluate(
+        _make_ctx(calibration_artifact=bad, require_calibration=True)
+    )
+    assert decision.allowed is False
+    assert decision.reason_code == "calibration_missing"
+
+
+def test_require_calibration_passes_with_good_artifact():
+    gate = PreTradeGate(_ok_risk(), _ok_family())
+    decision = gate.evaluate(
+        _make_ctx(
+            calibration_artifact=_good_calibration_artifact(),
+            require_calibration=True,
+        )
+    )
+    assert decision.allowed is True
+    assert decision.reason_code == "ok"
+
+
+def test_no_require_calibration_skips_when_missing():
+    """Backward compatible: without require_calibration, missing calib still passes."""
+    gate = PreTradeGate(_ok_risk(), _ok_family())
+    decision = gate.evaluate(_make_ctx(calibration_artifact=None))
+    assert decision.allowed is True
+    assert decision.checks["calibration"]["passed"] is True
+
+
+# ---------------------------------------------------------------------- #
+# ticker_cap — per-ticker hard exposure cap
+# ---------------------------------------------------------------------- #
+
+
+class _FakeTickerCap:
+    def __init__(self, allow=True, reason="ok"):
+        self._allow, self._reason = allow, reason
+        self.checked = []
+
+    def check(self, ticker, contracts, notional_cents):
+        self.checked.append((ticker, contracts, notional_cents))
+        return self._allow, self._reason
+
+
+def test_ticker_cap_blocks_over_limit():
+    cap = _FakeTickerCap(allow=False, reason="ticker notional 9000c > cap 1500c")
+    gate = PreTradeGate(_ok_risk(), _ok_family(), ticker_cap=cap)
+    decision = gate.evaluate(_make_ctx(calibration_artifact=_good_calibration_artifact()))
+    assert decision.allowed is False
+    assert decision.reason_code == "ticker_cap"
+    # notional = entry_cents(45) * contracts(5) = 225
+    assert cap.checked == [("KXBTC15M-26APR0800-T70000", 5, 225)]
+
+
+def test_ticker_cap_allows_under_limit():
+    cap = _FakeTickerCap(allow=True)
+    gate = PreTradeGate(_ok_risk(), _ok_family(), ticker_cap=cap)
+    decision = gate.evaluate(_make_ctx(calibration_artifact=_good_calibration_artifact()))
+    assert decision.allowed is True

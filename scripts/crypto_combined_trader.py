@@ -26,6 +26,8 @@ from engine.pair_pricing import evaluate_pair_opportunity, extract_book_from_ord
 from engine.pair_state import PairTracker
 from engine.pair_risk import PairRiskManager
 from engine.pre_trade_gate import PreTradeGate, GateContext, GateDecision
+from engine.crypto_decision import load_crypto_calibration
+from engine.ticker_exposure import TickerExposureTracker
 from engine.risk import RiskManager
 from engine.family_limits import FamilyLimits
 from engine.gate_risk_adapter import RiskManagerAdapter, FamilyLimitsAdapter
@@ -313,10 +315,32 @@ def _scorecard_hook(ctx):
         f"family={ctx.family} score={h.score:.2f}",
         h.metrics,
     )
+# Directional EV calibration for the ML leg. On live we fail-closed if it is
+# missing (no directional bet without an expected-value check); sim still runs.
+_calibration = load_crypto_calibration(settings.CRYPTO_CALIBRATION_PATH)
+if _calibration.get("exists"):
+    log.info(
+        "Loaded crypto calibration: version=%s generated_at=%s",
+        _calibration.get("version", "?"), _calibration.get("generated_at", "?"),
+    )
+else:
+    log.warning(
+        "Crypto calibration MISSING at %s — combined_ml live trades will be "
+        "blocked (fail-closed); sim unaffected.",
+        settings.CRYPTO_CALIBRATION_PATH,
+    )
+# Hard per-ticker exposure cap (restart-safe) — no single market may exceed
+# MAX_CONTRACTS_PER_TICKER / MAX_NOTIONAL_CENTS_PER_TICKER in a UTC day.
+_ticker_cap = TickerExposureTracker(
+    state_path=settings.TICKER_EXPOSURE_STATE_PATH,
+    max_contracts_per_ticker=settings.MAX_CONTRACTS_PER_TICKER,
+    max_notional_cents_per_ticker=settings.MAX_NOTIONAL_CENTS_PER_TICKER,
+)
 _pre_trade_gate = PreTradeGate(
     risk_mgr=_GATE_RISK_MGR,
     family_limits=_GATE_FAMILY_LIMITS,
     scorecard_hook=_scorecard_hook,
+    ticker_cap=_ticker_cap,
 )
 _gate_state: dict = {"last": None}
 
@@ -454,6 +478,8 @@ while True:
                         _ml_quote_fetch_ts = time.monotonic()
                         yb = []
                         nb = []
+                        _yes_bid_dollars = 0.0
+                        _no_bid_dollars = 0.0
                         try:
                             ob = client.get_orderbook(ticker, depth=3)
                             fp = ob.get("orderbook_fp", {})
@@ -462,6 +488,11 @@ while True:
                             if yb:
                                 yes_ask = 1.0 - float(nb[-1][0]) if nb else 0
                                 no_ask = 1.0 - float(yb[-1][0]) if yb else 0
+                            # Kalshi bids are ascending; best bid is the last element.
+                            # Use the canonical helper so this never drifts again.
+                            book = extract_book_from_orderbook(ob)
+                            _yes_bid_dollars = book["best_yes_bid"] / 100.0
+                            _no_bid_dollars = book["best_no_bid"] / 100.0
                         except Exception:
                             pass
 
@@ -477,14 +508,6 @@ while True:
                             edge = 0.485 - entry  # empirical P(win) for conjunction
                             if edge > ML_MIN_EDGE:
                                 ml_action = "trading"
-
-                                # Bids from orderbook fetch above (fp[0] is best bid level).
-                                try:
-                                    _yes_bid_dollars = float(yb[0][0]) if yb else 0.0
-                                    _no_bid_dollars = float(nb[0][0]) if nb else 0.0
-                                except Exception:
-                                    _yes_bid_dollars = 0.0
-                                    _no_bid_dollars = 0.0
 
                                 # Phase 1b: pre-trade gate
                                 _ml_gate_ctx = GateContext(
@@ -502,7 +525,11 @@ while True:
                                     max_stale_s=60.0,
                                     session_tag=_compute_session_tag(now),
                                     strategy_tag="combined_ml",
-                                    calibration_artifact=None,
+                                    calibration_artifact=_calibration if _calibration.get("exists") else None,
+                                    require_calibration=(args.mode == "live"),
+                                    min_trades=settings.CRYPTO_CALIBRATION_MIN_TRADES,
+                                    ev_buffer_cents=settings.CRYPTO_EV_BUFFER_CENTS,
+                                    min_net_ev_cents=settings.CRYPTO_MIN_NET_EV_CENTS,
                                 )
                                 try:
                                     _ml_gate_decision = _pre_trade_gate.evaluate(_ml_gate_ctx)
@@ -565,6 +592,8 @@ while True:
 
                                 alert_trade_placed(ticker, ml_side, entry_cents, ML_MAX_CONTRACTS,
                                                    edge * 100, strategy=f"combined_ml:{args.mode}")
+                                _ticker_cap.record(ticker, int(ML_MAX_CONTRACTS),
+                                                   int(entry_cents) * int(ML_MAX_CONTRACTS))
                                 ml_trades += 1
 
             # ============================================================
@@ -653,6 +682,9 @@ while True:
 
                             # Auto-scale per-series
                             pair_size = series_pair_size(series)
+
+                            # Record per-ticker exposure (pair cost = both legs).
+                            _ticker_cap.record(ticker, int(pair_size), int(mc) * int(pair_size))
 
                             if args.mode == "sim":
                                 pair = pair_tracker.start_pair(ticker, my, mn)
