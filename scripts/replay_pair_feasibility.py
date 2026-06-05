@@ -1,40 +1,55 @@
 """
-Replay pair feasibility on archived orderbook data.
+Replay MAKER pair feasibility on archived orderbook data.
 
-Answers: how often could both legs have filled below pair_cap?
-Uses archived KXBTC15M snapshots from D:/kalshi-data/market_archive/
+IMPORTANT: taker "buy both sides" is structurally impossible — implied asks
+always sum to >= 100c, so the only viable pair is MAKER (post limits at
+best_bid + 1). Maker economics derive directly from the book spread:
 
-Run: python scripts/replay_pair_feasibility.py
+    maker_gross = spread - 2     (spread = yes_ask + no_ask - 100)
+    maker_net   = maker_gross - real_maker_fee   (engine.fees)
+
+So you need spread >= ~2 + fee + min_net (~>=5c) to clear. This script reports
+the spread distribution (the orphan-risk proxy: tight spread => high orphan
+rate) and the maker-net opportunity rate per series.
+
+CAVEAT: these are POTENTIAL fills assuming BOTH legs fill. It does NOT model
+orphan risk, which is the real-world killer on tight books. Treat a positive
+maker-net rate as necessary-but-not-sufficient until the orphan-unwind state
+machine is shipped and paper orphan rates are measured.
+
+Run (on the data box): python -m scripts.replay_pair_feasibility --series KXDOGE15M
 """
+import argparse
 import logging
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import pandas as pd
 
 sys.path.insert(0, ".")
 
-from engine.pair_pricing import PAIR_FEE_CENTS
+from config.settings import settings
+from engine.pair_pricing import maker_economics_from_asks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pair_replay")
 
-ARCHIVE_DIR = Path("D:/kalshi-data/market_archive")
-PAIR_CAPS = [93, 94, 95, 96, 97, 98]  # test multiple caps
+ARCHIVE_DIR = Path(settings.DATA_DIR) / "market_archive"
+MIN_NETS = [1.0, 2.0, 3.0]  # min maker-net thresholds to report
 
 
-def load_all_snapshots() -> pd.DataFrame:
-    """Load all archived KXBTC15M snapshots."""
+def load_all_snapshots(series: str) -> pd.DataFrame:
+    """Load all archived snapshots for a series."""
     frames = []
+    if not ARCHIVE_DIR.exists():
+        return pd.DataFrame()
     for day_dir in sorted(ARCHIVE_DIR.iterdir()):
         if not day_dir.is_dir():
             continue
-        path = day_dir / "KXBTC15M.parquet"
+        path = day_dir / f"{series}.parquet"
         if path.exists():
             try:
-                df = pd.read_parquet(path)
-                frames.append(df)
+                frames.append(pd.read_parquet(path))
             except Exception:
                 log.warning("Failed to read %s", path)
     if not frames:
@@ -72,74 +87,58 @@ def analyze(df: pd.DataFrame) -> None:
         log.info("Wait 3-5 days for new data to accumulate, then re-run.")
         return
 
-    quoted["pair_cost"] = quoted["ya_cents"] + quoted["na_cents"]
-    quoted["gross_profit"] = 100 - quoted["pair_cost"]
-    quoted["net_profit"] = quoted["gross_profit"] - PAIR_FEE_CENTS
+    # Maker economics per snapshot (derived from implied asks).
+    econ = quoted.apply(
+        lambda r: maker_economics_from_asks(int(r["ya_cents"]), int(r["na_cents"])),
+        axis=1, result_type="expand",
+    )
+    quoted = pd.concat([quoted.reset_index(drop=True), econ.reset_index(drop=True)], axis=1)
 
-    print("\n" + "=" * 60)
-    print("PAIR FEASIBILITY REPLAY")
-    print("=" * 60)
+    print("\n" + "=" * 64)
+    print("MAKER PAIR FEASIBILITY REPLAY  (taker arb is impossible — maker only)")
+    print("=" * 64)
     print(f"Snapshots with quotes: {len(quoted)}")
     print(f"Unique tickers: {quoted['ticker'].nunique()}")
-    print(f"Date range: {quoted['timestamp'].min()[:10]} to {quoted['timestamp'].max()[:10]}")
 
-    # Pair cost distribution
-    print(f"\n--- PAIR COST DISTRIBUTION ---")
-    print(f"Mean: {quoted['pair_cost'].mean():.1f}c")
-    print(f"Median: {quoted['pair_cost'].median():.0f}c")
-    print(f"Min: {quoted['pair_cost'].min()}c")
-    print(f"Max: {quoted['pair_cost'].max()}c")
-    print(f"Std: {quoted['pair_cost'].std():.1f}c")
+    # Spread distribution = the orphan-risk proxy (tight => high orphan rate).
+    print(f"\n--- SPREAD DISTRIBUTION (orphan-risk proxy) ---")
+    print(f"Mean: {quoted['spread_cents'].mean():.1f}c  Median: {quoted['spread_cents'].median():.0f}c  "
+          f"Min: {quoted['spread_cents'].min()}c  Max: {quoted['spread_cents'].max()}c")
+    for thr in (1, 2, 3, 5, 7):
+        pct = (quoted['spread_cents'] >= thr).mean() * 100
+        print(f"  spread >= {thr}c: {pct:5.1f}% of snapshots")
 
-    # Opportunity frequency at various caps
-    print(f"\n--- OPPORTUNITY FREQUENCY BY PAIR CAP ---")
-    for cap in PAIR_CAPS:
-        opps = quoted[quoted["pair_cost"] <= cap]
+    # Maker-net opportunity rate (BOTH-legs-fill assumption — orphan risk NOT modeled).
+    print(f"\n--- MAKER-NET OPPORTUNITY RATE (assumes both legs fill) ---")
+    for mn in MIN_NETS:
+        opps = quoted[quoted["maker_net"] >= mn]
         pct = len(opps) / len(quoted) * 100
-        avg_net = opps["net_profit"].mean() if len(opps) else 0
-        print(f"  Cap {cap}c: {len(opps):>5}/{len(quoted)} snapshots ({pct:>5.1f}%) "
-              f"avg net={avg_net:+.1f}c/pair")
+        avg = opps["maker_net"].mean() if len(opps) else 0
+        print(f"  maker_net >= {mn:.0f}c: {len(opps):>6}/{len(quoted)} ({pct:5.1f}%)  avg={avg:+.1f}c/pair")
 
-    # Per-ticker analysis
-    print(f"\n--- PER-MARKET ANALYSIS (cap=96c) ---")
-    for ticker, group in quoted.groupby("ticker"):
-        n = len(group)
-        opps = group[group["pair_cost"] <= 96]
-        if n < 3:
+    print(f"\n--- PER-MARKET (maker_net >= 2c) ---")
+    for ticker, g in quoted.groupby("ticker"):
+        if len(g) < 3:
             continue
-        pct = len(opps) / n * 100
-        avg_cost = group["pair_cost"].mean()
-        print(f"  {ticker}: {n} snaps, {len(opps)} opps ({pct:.0f}%), avg cost={avg_cost:.0f}c")
+        opps = g[g["maker_net"] >= 2.0]
+        print(f"  {ticker}: {len(g)} snaps, {len(opps)} opps ({len(opps)/len(g)*100:.0f}%), "
+              f"avg spread={g['spread_cents'].mean():.1f}c")
 
-    # Time analysis (if we have enough data)
-    if "timestamp" in quoted.columns and len(quoted) > 10:
-        quoted["hour"] = pd.to_datetime(quoted["timestamp"]).dt.hour
-        print(f"\n--- OPPORTUNITY BY HOUR (UTC, cap=96c) ---")
-        for hour in sorted(quoted["hour"].unique()):
-            h_data = quoted[quoted["hour"] == hour]
-            h_opps = h_data[h_data["pair_cost"] <= 96]
-            pct = len(h_opps) / len(h_data) * 100 if len(h_data) else 0
-            avg_net = h_opps["net_profit"].mean() if len(h_opps) else 0
-            print(f"  {hour:02d}:00 UTC: {len(h_data):>4} snaps, {len(h_opps):>4} opps ({pct:>5.1f}%) avg net={avg_net:+.1f}c")
-
-    # Summary
-    best_cap_opps = quoted[quoted["pair_cost"] <= 96]
-    print(f"\n--- SUMMARY ---")
-    if len(best_cap_opps) > 0:
-        total_potential = best_cap_opps["net_profit"].sum()
-        print(f"Total potential profit at 96c cap: {total_potential:+.0f}c (${total_potential/100:+.2f})")
-        print(f"Avg net per opportunity: {best_cap_opps['net_profit'].mean():+.1f}c")
-        print(f"Opportunity rate: {len(best_cap_opps)/len(quoted)*100:.1f}%")
-        print(f"\nVERDICT: {'GO' if best_cap_opps['net_profit'].mean() > 1.0 and len(best_cap_opps)/len(quoted) > 0.05 else 'NEED MORE DATA'}")
-    else:
-        print("No opportunities found at 96c cap.")
-        print("VERDICT: NEED MORE DATA (archiver was broken, fixed now)")
+    print(f"\n--- VERDICT ---")
+    rate = (quoted["maker_net"] >= 2.0).mean()
+    print(f"maker_net>=2c rate: {rate*100:.1f}%  |  median spread: {quoted['spread_cents'].median():.0f}c")
+    print("REMINDER: positive here is necessary but NOT sufficient — orphan risk is")
+    print("not modeled. Ship the orphan-unwind state machine and measure paper orphan")
+    print("rate before enabling live (see docs/value_and_pair_findings.md).")
 
 
 if __name__ == "__main__":
-    df = load_all_snapshots()
+    ap = argparse.ArgumentParser(description="Maker pair feasibility replay")
+    ap.add_argument("--series", default="KXBTC15M", help="series ticker to analyze")
+    args = ap.parse_args()
+    df = load_all_snapshots(args.series)
     if df.empty:
-        log.error("No archive data found at %s", ARCHIVE_DIR)
+        log.error("No archive data for %s under %s", args.series, ARCHIVE_DIR)
     else:
-        log.info("Loaded %d total snapshots", len(df))
+        log.info("Loaded %d snapshots for %s", len(df), args.series)
         analyze(df)

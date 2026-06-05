@@ -51,6 +51,41 @@ def is_pair_profitable(yes_ask_cents: int, no_ask_cents: int, min_net_cents: flo
     return pair_net_profit_cents(yes_ask_cents, no_ask_cents) >= min_net_cents
 
 
+def maker_economics_from_asks(yes_ask_cents: int, no_ask_cents: int) -> dict:
+    """Maker pair economics derived directly from the two implied asks.
+
+    On Kalshi, implied asks are ``yes_ask = 100 - best_no_bid`` and
+    ``no_ask = 100 - best_yes_bid``. Posting maker limits at ``best_bid + 1`` on
+    each leg gives:
+
+        maker_yes_price = (100 - no_ask) + 1
+        maker_no_price  = (100 - yes_ask) + 1
+        maker_pair_cost = 202 - yes_ask - no_ask
+        maker_gross     = 100 - maker_pair_cost = (yes_ask + no_ask) - 102
+                        = spread - 2          where spread = yes_ask + no_ask - 100
+
+    So maker profit is governed entirely by the book spread: you need
+    ``spread >= 2 + fees + min_net`` to clear. This is why only wide-spread
+    series (~>=5c) are viable. NOTE: this assumes BOTH legs fill — it does not
+    model orphan risk, which is the real-world killer on tight books.
+    """
+    spread = yes_ask_cents + no_ask_cents - 100
+    maker_yes_price = (100 - no_ask_cents) + 1
+    maker_no_price = (100 - yes_ask_cents) + 1
+    maker_pair_cost = maker_yes_price + maker_no_price
+    maker_gross = 100 - maker_pair_cost
+    maker_fee = pair_fee_cents(maker_yes_price, maker_no_price, contracts=1)
+    return {
+        "spread_cents": spread,
+        "maker_yes_price": maker_yes_price,
+        "maker_no_price": maker_no_price,
+        "maker_pair_cost": maker_pair_cost,
+        "maker_gross": maker_gross,
+        "maker_fee": round(maker_fee, 2),
+        "maker_net": round(maker_gross - maker_fee, 2),
+    }
+
+
 def extract_book_from_orderbook(orderbook_response: dict) -> dict:
     """Extract bids and implied asks from Kalshi orderbook response.
 
