@@ -1,6 +1,7 @@
 """Tests for the value-strategy calibration backtest harness."""
 from scripts.backtest_value_strategy import (
     run_calibration_backtest,
+    simulate_strategy_pnl,
     synthetic_bars,
     _calibration_metrics,
 )
@@ -27,6 +28,19 @@ def test_reliability_buckets_track_diagonal():
 def test_calibration_metrics_empty():
     m = _calibration_metrics(np.array([]), np.array([]))
     assert m["n"] == 0
+
+
+def test_strategy_profits_only_when_market_lags():
+    bars = synthetic_bars(n_minutes=8000, seed=5)
+    # Efficient market (no lag): the strategy should find ~no edge.
+    eff = simulate_strategy_pnl(bars, lag_min=0, half_spread_cents=2, min_edge_cents=2.0)
+    # Lagging market: positive expected edge per trade.
+    lag = simulate_strategy_pnl(bars, lag_min=4, half_spread_cents=2, min_edge_cents=2.0)
+    assert lag["trades"] > 100
+    assert lag["avg_pnl_cents"] > 0
+    # The lagging market must be strictly more profitable than the efficient one.
+    eff_avg = eff.get("avg_pnl_cents", 0.0) if eff.get("trades", 0) else 0.0
+    assert lag["avg_pnl_cents"] > eff_avg
 
 
 def test_perfect_predictions_have_zero_brier():

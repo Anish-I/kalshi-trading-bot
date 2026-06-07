@@ -27,7 +27,7 @@ import pandas as pd
 
 from engine.fair_value import prob_yes, sigma_per_min_from_returns
 from engine.value_decision import decide_value_trade
-from engine.fees import multiplier_for_family
+from engine.fees import multiplier_for_family, kalshi_fee_cents, DEFAULT_MULTIPLIER
 
 WINDOW_MIN = 15
 # Decision minutes (minutes ELAPSED into the window) we evaluate. The edge lives
@@ -118,6 +118,86 @@ def _calibration_metrics(p: np.ndarray, y: np.ndarray) -> dict:
     }
 
 
+def simulate_strategy_pnl(
+    bars: pd.DataFrame,
+    *,
+    lag_min: int = 2,
+    half_spread_cents: int = 2,
+    min_edge_cents: float = 2.0,
+    max_entry_cents: int = 90,
+    vol_window: int = 15,
+    fee_multiplier: float = DEFAULT_MULTIPLIER,
+) -> dict:
+    """Realized PnL of the value strategy against a market that LAGS fair value.
+
+    Models the edge observed live: the book prices off a slightly stale spot, so
+    when price moves the quote lags the now-near-decided outcome. We price fair
+    value off the CURRENT spot and the market off ``lag_min`` minutes ago, add a
+    half-spread, then run the real decision + fee logic and settle on the actual
+    window outcome. With ``lag_min=0`` and a wide spread, no edge should exist —
+    a useful sanity floor.
+    """
+    df = bars.copy()
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    df["window"] = df["timestamp"].dt.floor(f"{WINDOW_MIN}min")
+    close = df["close"].to_numpy(dtype=float)
+    ret1m = _log_returns(close)
+
+    def _clamp(c: int) -> int:
+        return max(1, min(99, int(round(c))))
+
+    pnls: list[float] = []
+    wins = 0
+    for win, g in df.groupby("window"):
+        if len(g) < WINDOW_MIN:
+            continue
+        idx = g.index.to_numpy()
+        strike = float(close[idx[0]])
+        realized_yes = close[idx[-1]] >= strike
+        for elapsed in DECISION_ELAPSED:
+            if elapsed >= len(g):
+                continue
+            here = idx[elapsed]
+            lag_pos = max(idx[0], here - lag_min)
+            spot_now = float(close[here])
+            spot_lag = float(close[lag_pos])
+            t_remaining = WINDOW_MIN - elapsed
+            sigma = sigma_per_min_from_returns(ret1m[: here + 1].tolist(), window=vol_window)
+            if sigma is None:
+                continue
+            fair_p = prob_yes(spot_now, strike, t_remaining, sigma)
+            market_p = prob_yes(spot_lag, strike, t_remaining, sigma)
+            yes_ask = _clamp(market_p * 100 + half_spread_cents)
+            no_ask = _clamp((1 - market_p) * 100 + half_spread_cents)
+            d = decide_value_trade(
+                fair_p, yes_ask, no_ask,
+                min_edge_cents=min_edge_cents, multiplier=fee_multiplier,
+                max_entry_cents=max_entry_cents,
+            )
+            if d.side is None:
+                continue
+            won = (d.side == "yes" and realized_yes) or (d.side == "no" and not realized_yes)
+            payoff = 100 if won else 0
+            fee = kalshi_fee_cents(d.entry_cents, 1, maker=False, multiplier=fee_multiplier)
+            pnls.append(payoff - d.entry_cents - fee)
+            wins += int(won)
+
+    arr = np.asarray(pnls)
+    if arr.size == 0:
+        return {"trades": 0, "note": "no qualifying trades"}
+    return {
+        "trades": int(arr.size),
+        "win_rate": wins / arr.size,
+        "total_pnl_cents": float(arr.sum()),
+        "avg_pnl_cents": float(arr.mean()),
+        "lag_min": lag_min,
+        "half_spread_cents": half_spread_cents,
+        "min_edge_cents": min_edge_cents,
+    }
+
+
 def synthetic_bars(n_minutes: int = 6000, sigma_per_min: float = 0.0009, seed: int = 7) -> pd.DataFrame:
     """GBM price path for a self-check. Model assumes this process, so it should
     come out well-calibrated (Brier << 0.25)."""
@@ -148,11 +228,21 @@ def main() -> None:
     ap.add_argument("--bars", action="store_true", help="use real 1m bars from DATA_DIR/bars_1m")
     ap.add_argument("--synthetic", action="store_true", help="self-check on a synthetic GBM path")
     ap.add_argument("--vol-window", type=int, default=15)
+    ap.add_argument("--min-edge-cents", type=float, default=2.0)
     args = ap.parse_args()
 
     if args.synthetic or not args.bars:
         print("=== SYNTHETIC self-check (GBM) ===")
-        _print_report(run_calibration_backtest(synthetic_bars(), vol_window=args.vol_window))
+        sb = synthetic_bars()
+        _print_report(run_calibration_backtest(sb, vol_window=args.vol_window))
+        print("\n--- strategy PnL vs a lagging market (synthetic) ---")
+        for lag in (0, 2, 4):
+            r = simulate_strategy_pnl(sb, lag_min=lag, half_spread_cents=2, min_edge_cents=args.min_edge_cents)
+            if r.get("trades", 0):
+                print(f"  lag={lag}m: {r['trades']:5d} trades  win={r['win_rate']:.3f}  "
+                      f"avg={r['avg_pnl_cents']:+.2f}c/trade  total={r['total_pnl_cents']:+.0f}c")
+            else:
+                print(f"  lag={lag}m: no qualifying trades")
         if not args.bars:
             return
 
@@ -166,6 +256,14 @@ def main() -> None:
     bars = pd.concat(frames, ignore_index=True)
     print(f"\n=== REAL bars: {len(files)} files, {len(bars)} rows ===")
     _print_report(run_calibration_backtest(bars, vol_window=args.vol_window))
+    print("\n--- strategy PnL vs a lagging market (real bars) ---")
+    for lag in (0, 2, 4):
+        r = simulate_strategy_pnl(bars, lag_min=lag, half_spread_cents=2, min_edge_cents=args.min_edge_cents)
+        if r.get("trades", 0):
+            print(f"  lag={lag}m: {r['trades']:6d} trades  win={r['win_rate']:.3f}  "
+                  f"avg={r['avg_pnl_cents']:+.2f}c/trade  total={r['total_pnl_cents']:+.0f}c")
+        else:
+            print(f"  lag={lag}m: no qualifying trades")
 
 
 if __name__ == "__main__":
