@@ -28,6 +28,8 @@ from engine.pair_risk import PairRiskManager
 from engine.pre_trade_gate import PreTradeGate, GateContext, GateDecision
 from engine.crypto_decision import load_crypto_calibration
 from engine.ticker_exposure import TickerExposureTracker
+from engine.value_strategy import evaluate_market
+from engine.fair_value import sigma_per_min_from_returns
 from engine.risk import RiskManager
 from engine.family_limits import FamilyLimits
 from engine.gate_risk_adapter import RiskManagerAdapter, FamilyLimitsAdapter
@@ -79,6 +81,13 @@ SCHEMA_PATH = Path("D:/kalshi-models/latest_model.schema.json")
 ML_MAX_CONTRACTS = 10
 ML_MAX_ENTRY_PRICE = 0.45
 ML_MIN_EDGE = 0.03
+
+# VALUE strategy (Phase 2): bet the side that's cheap vs fair value
+# (P(YES)=Phi(ln(spot/strike)/(sigma*sqrt(T)))). BTC only (spot feed is BTC).
+VALUE_ENABLED = True
+VALUE_CONTRACTS = 1
+VALUE_MIN_EDGE_CENTS = 2.0
+VALUE_MAX_ENTRY = 90
 PAIR_MIN_NET = 5.0  # minimum 5c net profit per pair (raised from 2.5c to absorb orphan risk)
 FLATTEN_MAX_SLIPPAGE_CENTS = 5  # refuse flatten if exit is worse than entry by more than this
 SCAN_INTERVAL = 15  # scan every 15s to catch spread windows faster
@@ -355,10 +364,12 @@ momentum_model = MomentumModel()
 
 traded_tickers_ml = set()
 traded_tickers_pair = set()
+traded_tickers_value = set()
 trailing_stop = TrailingStopLoss(MAX_DRAWDOWN, TRAILING_ACTIVATION, TRAILING_LOCK_PCT, ORPHAN_RISK_DISCOUNT)
 scan_count = 0
 ml_trades = 0
 pair_trades = 0
+value_trades = 0
 ml_wins = 0
 ml_losses = 0
 
@@ -429,6 +440,18 @@ while True:
             continue
 
         btc = get_btc_price()
+        # Per-scan realized vol for the VALUE strategy (per-minute log-return std).
+        _scan_sigma = None
+        if VALUE_ENABLED:
+            _vf = load_latest_features()
+            if _vf is not None and len(_vf):
+                try:
+                    _sv = _vf.iloc[-1].get("volatility_15m")
+                    _scan_sigma = float(_sv) if _sv and float(_sv) > 0 else None
+                except Exception:
+                    _scan_sigma = None
+                if _scan_sigma is None and "ret_1m" in _vf.columns:
+                    _scan_sigma = sigma_per_min_from_returns(_vf["ret_1m"].tolist(), 15)
         last_ticker = None
         last_remaining = 0
         last_ml_action = "no_signal"
@@ -1049,9 +1072,80 @@ while True:
                         # Spread collapsed — reset qualification
                         _series_spread_qualified.pop(f"{series}:{ticker}", None)
 
+            # ============================================================
+            # STRATEGY 3: VALUE (cheap-vs-fair, BTC only)
+            # ============================================================
+            value_action = "no_signal"
+            if (
+                VALUE_ENABLED
+                and series == "KXBTC15M"
+                and btc > 0
+                and _scan_sigma
+                and ticker not in traded_tickers_value
+                and ticker not in traded_tickers_ml
+            ):
+                mev = evaluate_market(
+                    market, btc, _scan_sigma, now=now,
+                    min_edge_cents=VALUE_MIN_EDGE_CENTS,
+                    max_entry_cents=VALUE_MAX_ENTRY,
+                    family="btc_15m",
+                )
+                vd = mev.decision
+                if vd is not None and vd.side is not None:
+                    v_yes_ask = float(market.get("yes_ask_dollars", market.get("yes_ask", 0)) or 0)
+                    v_no_ask = float(market.get("no_ask_dollars", market.get("no_ask", 0)) or 0)
+                    _v_ctx = GateContext(
+                        ticker=ticker, family="btc_15m", side=vd.side,
+                        entry_cents=vd.entry_cents, contracts=int(VALUE_CONTRACTS),
+                        yes_ask=v_yes_ask, no_ask=v_no_ask,
+                        yes_bid=float(market.get("yes_bid_dollars", market.get("yes_bid", 0)) or 0),
+                        no_bid=float(market.get("no_bid_dollars", market.get("no_bid", 0)) or 0),
+                        model_prob=mev.fair_p if vd.side == "yes" else (1.0 - mev.fair_p),
+                        quote_age_s=0.0, max_stale_s=60.0,
+                        session_tag=_compute_session_tag(now),
+                        strategy_tag="combined_value",
+                    )
+                    try:
+                        _v_dec = _pre_trade_gate.evaluate(_v_ctx)
+                    except Exception:
+                        log.error("VALUE gate exception %s", ticker, exc_info=True)
+                        _v_dec = None
+                    if _v_dec is not None and _v_dec.allowed:
+                        if args.mode == "sim":
+                            traded_tickers_value.add(ticker)
+                            value_action = "trading"
+                            log.info(">>> VALUE SIM: %s %s @%dc x%d | fairP=%.3f ev=%+.2fc strike=%.2f spot=%.0f T=%.1fm",
+                                     vd.side.upper(), ticker, vd.entry_cents, VALUE_CONTRACTS,
+                                     mev.fair_p, vd.net_ev_cents, mev.strike or 0, btc, mev.remaining_s / 60.0)
+                        else:
+                            try:
+                                yes_price = vd.entry_cents if vd.side == "yes" else None
+                                no_price = vd.entry_cents if vd.side == "no" else None
+                                resp = client.place_order(
+                                    ticker=ticker, side=vd.side, action="buy",
+                                    count=VALUE_CONTRACTS, order_type="limit",
+                                    yes_price=yes_price, no_price=no_price,
+                                )
+                                od = resp.get("order", resp)
+                                traded_tickers_value.add(ticker)
+                                value_action = "trading"
+                                log.info(">>> VALUE LIVE: %s %s @%dc x%d order=%s status=%s",
+                                         vd.side.upper(), ticker, vd.entry_cents, VALUE_CONTRACTS,
+                                         od.get("order_id", "?"), od.get("status", "?"))
+                            except Exception:
+                                log.error("VALUE order failed", exc_info=True)
+                        if value_action == "trading":
+                            _ticker_cap.record(ticker, int(VALUE_CONTRACTS),
+                                               int(vd.entry_cents) * int(VALUE_CONTRACTS))
+                            alert_trade_placed(ticker, vd.side, vd.entry_cents, VALUE_CONTRACTS,
+                                               vd.net_ev_cents, strategy=f"combined_value:{args.mode}")
+                            value_trades += 1
+                    elif _v_dec is not None:
+                        log.info("GATE BLOCK [%s] %s: %s", ticker, _v_dec.reason_code, _v_dec.reason_detail)
+
             last_ml_action = ml_action
             last_pair_action = pair_action
-            if ml_action == "trading" or pair_action == "trading":
+            if ml_action == "trading" or pair_action == "trading" or value_action == "trading":
                 should_write_state = True
 
         # ============================================================
@@ -1092,7 +1186,8 @@ while True:
         time.sleep(SCAN_INTERVAL)
 
     except KeyboardInterrupt:
-        log.info("Combined trader stopped. ML: %d trades, Pair: %d trades", ml_trades, pair_trades)
+        log.info("Combined trader stopped. ML: %d trades, Pair: %d trades, Value: %d trades",
+                 ml_trades, pair_trades, value_trades)
         break
     except Exception:
         log.error("Combined trader error", exc_info=True)
