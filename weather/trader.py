@@ -36,11 +36,12 @@ class WeatherTrader:
         # --- Kalshi API ---
         self.kalshi_client = KalshiClient()
 
-        # --- Risk management ---
+        # --- Risk management (persisted so a restart can't reset the daily loss) ---
         self.risk_manager = RiskManager(
             max_contracts=settings.WEATHER_MAX_CONTRACTS,
             daily_loss_limit_cents=int(settings.DAILY_LOSS_LIMIT_CENTS * 0.4),
             consecutive_loss_halt=8,
+            state_path=self._data_dir / "weather_risk_state.json",
         )
 
         # --- Position tracking ---

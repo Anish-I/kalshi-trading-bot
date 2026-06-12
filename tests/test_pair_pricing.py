@@ -11,6 +11,7 @@ from engine.pair_pricing import (
     is_pair_profitable,
     extract_book_from_orderbook,
     evaluate_pair_opportunity,
+    maker_economics_from_asks,
 )
 
 
@@ -25,8 +26,9 @@ def test_pair_gross_profit():
 
 
 def test_pair_net_profit():
+    # Real price-dependent maker fees: yes@40 + no@50 maker = 1c + 1c = 2c.
     net = pair_net_profit_cents(40, 50)
-    assert net == pytest.approx(10 - 2.14, abs=0.01)
+    assert net == pytest.approx(10 - 2.0, abs=0.01)
 
 
 def test_is_profitable():
@@ -133,3 +135,20 @@ def test_tight_market_no_maker_opportunity():
     # Maker: 50 + 50 = 100c — too expensive
     assert opp["maker_pair_cost"] == 100
     assert opp["maker_tradeable"] is False
+
+
+def test_maker_economics_from_asks_wide_spread_profitable():
+    # Wide spread: yes_ask 55 + no_ask 50 = 105 -> spread 5c.
+    e = maker_economics_from_asks(55, 50)
+    assert e["spread_cents"] == 5
+    # maker_gross = spread - 2 = 3c; net = 3 - ~2c fee > 0.
+    assert e["maker_gross"] == 3
+    assert e["maker_net"] > 0
+
+
+def test_maker_economics_from_asks_tight_spread_unprofitable():
+    # Tight spread: yes_ask 51 + no_ask 50 = 101 -> spread 1c.
+    e = maker_economics_from_asks(51, 50)
+    assert e["spread_cents"] == 1
+    assert e["maker_gross"] == -1   # spread - 2
+    assert e["maker_net"] < 0

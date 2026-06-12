@@ -6,9 +6,12 @@ Shared across all market families to prevent trading on bad quotes.
 import logging
 import time
 
+from engine.fees import kalshi_fee_cents
+
 logger = logging.getLogger(__name__)
 
-# Kalshi fee: ~1.07c per contract per side (varies, using conservative estimate)
+# Retained for backward compatibility with importers; real fee drag is now
+# computed per-price via engine.fees.kalshi_fee_cents (see check_quote_quality).
 KALSHI_FEE_CENTS_PER_SIDE = 1.07
 ROUND_TRIP_FEE_CENTS = KALSHI_FEE_CENTS_PER_SIDE * 2
 
@@ -58,14 +61,16 @@ def check_quote_quality(
     if side == "yes" and yes_ask > 0:
         raw_edge = model_prob - yes_ask
         entry_cents = yes_ask * 100
-        fee_drag = ROUND_TRIP_FEE_CENTS / entry_cents if entry_cents > 0 else 0
+        # Settlement is fee-free on Kalshi, so the only fee is the taker entry.
+        fee_drag = kalshi_fee_cents(entry_cents) / entry_cents if entry_cents > 0 else 0
         net_edge = raw_edge - fee_drag
         if net_edge < min_edge_after_fees_pct:
             return False, f"edge after fees too small: {net_edge:.1%} < {min_edge_after_fees_pct:.1%}"
     elif side == "no" and no_ask > 0:
         raw_edge = (1.0 - model_prob) - no_ask
         entry_cents = no_ask * 100
-        fee_drag = ROUND_TRIP_FEE_CENTS / entry_cents if entry_cents > 0 else 0
+        # Settlement is fee-free on Kalshi, so the only fee is the taker entry.
+        fee_drag = kalshi_fee_cents(entry_cents) / entry_cents if entry_cents > 0 else 0
         net_edge = raw_edge - fee_drag
         if net_edge < min_edge_after_fees_pct:
             return False, f"edge after fees too small: {net_edge:.1%} < {min_edge_after_fees_pct:.1%}"

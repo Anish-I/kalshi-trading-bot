@@ -17,6 +17,15 @@ class Settings(BaseSettings):
     DAILY_LOSS_LIMIT_CENTS: int = 25000
     CONFIDENCE_THRESHOLD: float = 0.65
     CONSECUTIVE_LOSS_HALT: int = 5
+
+    # Per-ticker hard caps — no single market may exceed these. Prevents a single
+    # ticker from running to a catastrophic loss (see 26MAR25: two BTC_15M NO
+    # trades lost -$110 combined). Enforced in PreTradeGate for every crypto path.
+    MAX_CONTRACTS_PER_TICKER: int = 10
+    MAX_NOTIONAL_CENTS_PER_TICKER: int = 1500  # $15 cap per ticker
+    TICKER_EXPOSURE_STATE_PATH: str = "D:/kalshi-data/ticker_exposure.json"
+    # Persisted RiskManager state (daily PnL + consecutive losses survive restarts).
+    RISK_STATE_PATH: str = "D:/kalshi-data/risk_state.json"
     COLLECTOR_STALE_SECONDS: int = 120
     CRYPTO_LIVE_SESSIONS: str = "us_core"
     CRYPTO_DECISION_MODE: str = "calibrated_ev"
@@ -51,6 +60,11 @@ class Settings(BaseSettings):
     # Kraken API Key
     KRAKEN_API_KEY: str = ""
     KRAKEN_PRIVATE_KEY: str = ""
+
+    # Dashboard auth — shared-secret bearer token for state-mutating endpoints.
+    # Empty string = control plane disabled (fail-closed). Required when the
+    # dashboard is exposed via Cloudflare Tunnel or any non-localhost path.
+    DASHBOARD_AUTH_TOKEN: str = ""
 
     model_config = {"env_file": str(_PROJECT_ROOT / ".env"), "env_file_encoding": "utf-8"}
 

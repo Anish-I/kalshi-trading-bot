@@ -35,6 +35,10 @@ class GateContext:
     session_tag: str
     strategy_tag: str  # "ml" | "pair" | "combined_ml" | "combined_pair"
     calibration_artifact: dict | None = None
+    # When True, a missing/unusable calibration artifact BLOCKS the trade
+    # (fail-closed). Set True for directional strategies in live mode so the
+    # bot never places a directional bet without an expected-value check.
+    require_calibration: bool = False
     # Optional knobs forwarded to evaluate_calibrated_trade
     min_trades: int = 30
     ev_buffer_cents: float = 0.0
@@ -84,6 +88,7 @@ class PreTradeGate:
         calibration_loader: Callable[[GateContext], dict | None] | None = None,
         allowed_sessions: Iterable[str] | None = None,
         scorecard_hook: Callable[[GateContext], tuple[bool, str, dict]] | None = None,
+        ticker_cap=None,
     ):
         self.risk_mgr = risk_mgr
         self.family_limits = family_limits
@@ -92,6 +97,8 @@ class PreTradeGate:
             frozenset(allowed_sessions) if allowed_sessions is not None else DEFAULT_ALLOWED_SESSIONS
         )
         self.scorecard_hook = scorecard_hook
+        # Optional TickerExposureTracker — hard per-ticker contracts/notional cap.
+        self.ticker_cap = ticker_cap
 
     # ------------------------------------------------------------------ #
     # internal helpers
@@ -139,6 +146,23 @@ class PreTradeGate:
         )
         if not ok:
             return self._block(checks, "order_size", detail)
+
+        # 2b) Per-ticker hard cap (contracts + notional). Prevents a single
+        # market from accumulating catastrophic exposure across scans.
+        if self.ticker_cap is not None:
+            ticker_notional = int(ctx.entry_cents) * int(ctx.contracts)
+            ok, detail = self.ticker_cap.check(
+                ctx.ticker, int(ctx.contracts), ticker_notional
+            )
+            self._record(
+                checks,
+                "ticker_cap",
+                ok,
+                detail,
+                {"ticker": ctx.ticker, "contracts": ctx.contracts, "notional_cents": ticker_notional},
+            )
+            if not ok:
+                return self._block(checks, "ticker_cap", detail)
 
         # 3) Family budget
         proposed_cents = int(ctx.entry_cents) * int(ctx.contracts)
@@ -205,8 +229,22 @@ class PreTradeGate:
         if artifact is None and self.calibration_loader is not None:
             artifact = self.calibration_loader(ctx)
 
-        if artifact is None:
-            # No calibration provided — record skip and continue. Treat as pass.
+        if artifact is None or not artifact.get("exists", True):
+            if getattr(ctx, "require_calibration", False):
+                # Fail-closed: a directional bet must have a usable EV check.
+                self._record(
+                    checks,
+                    "calibration",
+                    False,
+                    "calibration required but missing/unusable",
+                    {},
+                )
+                return self._block(
+                    checks,
+                    "calibration_missing",
+                    "calibration artifact required but not available",
+                )
+            # Not required (sim, or non-directional leg) — record skip and pass.
             self._record(
                 checks,
                 "calibration",
