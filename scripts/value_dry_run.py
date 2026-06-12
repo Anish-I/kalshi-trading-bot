@@ -75,11 +75,11 @@ def _settle_paper(client: httpx.Client, paper: dict, now: datetime) -> None:
             return  # not settled yet; retry next scan
         won = result == pos["side"]
         fee = kalshi_fee_cents(pos["entry_cents"], 1, maker=False)
-        pnl = (100 if won else 0) - pos["entry_cents"] - fee
+        pnl = float((100 if won else 0) - pos["entry_cents"] - fee)
         pos["result"] = result
         pos["pnl"] = pnl
         print(f"[{now:%H:%M:%S}] SETTLED {ticker[-12:]}: result={result.upper()} "
-              f"side={pos['side']} entry={pos['entry_cents']}c -> {pnl:+d}c", flush=True)
+              f"side={pos['side']} entry={pos['entry_cents']}c -> {pnl:+.0f}c", flush=True)
 
 
 def main() -> None:
@@ -153,7 +153,7 @@ def main() -> None:
         total = sum(p["pnl"] for p in settled)
         wins = sum(1 for p in settled if p["pnl"] > 0)
         print(f"paper session: {len(paper)} entries, {len(settled)} settled, "
-              f"{wins} wins, total {total:+d}c", flush=True)
+              f"{wins} wins, total {total:+.0f}c", flush=True)
 
 
 if __name__ == "__main__":
