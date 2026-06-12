@@ -60,3 +60,25 @@ def test_missing_vol_no_trade():
     m = _market(close_minutes_from_now=5)
     ev = evaluate_market(m, spot=60300, sigma_per_min=0.0, now=NOW)
     assert ev.decision is None and "vol" in ev.reason
+
+
+# ----------------------- adaptive edge threshold ----------------------- #
+
+def test_adaptive_edge_requires_more_early():
+    # Same mispricing: passes with slope=0 but fails when far from close with
+    # the default slope (required edge = base + 0.5 * minutes).
+    m = _market(close_minutes_from_now=12, floor_strike=60000, yes_ask=0.62, no_ask=0.50)
+    flat = evaluate_market(m, spot=60050, sigma_per_min=0.0005, now=NOW,
+                           min_edge_cents=1.0, edge_slope_per_min=0.0)
+    adaptive = evaluate_market(m, spot=60050, sigma_per_min=0.0005, now=NOW,
+                               min_edge_cents=1.0)  # default slope 0.5
+    assert flat.decision is not None and flat.decision.side is not None
+    assert adaptive.decision is not None and adaptive.decision.side is None
+    assert "min" in adaptive.decision.reason
+
+
+def test_adaptive_edge_still_takes_fat_edges_late():
+    # Near close, threshold is low and a clear mispricing still trades.
+    m = _market(close_minutes_from_now=3, floor_strike=60000, yes_ask=0.90, no_ask=0.11)
+    ev = evaluate_market(m, spot=60300, sigma_per_min=0.001, now=NOW, min_edge_cents=1.0)
+    assert ev.decision is not None and ev.decision.side == "yes"

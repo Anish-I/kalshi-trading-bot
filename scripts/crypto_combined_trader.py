@@ -29,7 +29,7 @@ from engine.pre_trade_gate import PreTradeGate, GateContext, GateDecision
 from engine.crypto_decision import load_crypto_calibration
 from engine.ticker_exposure import TickerExposureTracker
 from engine.value_strategy import evaluate_market
-from engine.fair_value import sigma_per_min_from_returns
+from engine.fair_value import calibrated_sigma_per_min, BTC15M_VOL_SCALE
 from engine.risk import RiskManager
 from engine.family_limits import FamilyLimits
 from engine.gate_risk_adapter import RiskManagerAdapter, FamilyLimitsAdapter
@@ -440,18 +440,21 @@ while True:
             continue
 
         btc = get_btc_price()
-        # Per-scan realized vol for the VALUE strategy (per-minute log-return std).
+        # Per-scan realized vol for the VALUE strategy: calibrated EWMA
+        # (engine.fair_value), consistent with the validated backtest. Fall back
+        # to the scaled volatility_15m feature only when ret_1m is missing.
         _scan_sigma = None
         if VALUE_ENABLED:
             _vf = load_latest_features()
             if _vf is not None and len(_vf):
-                try:
-                    _sv = _vf.iloc[-1].get("volatility_15m")
-                    _scan_sigma = float(_sv) if _sv and float(_sv) > 0 else None
-                except Exception:
-                    _scan_sigma = None
-                if _scan_sigma is None and "ret_1m" in _vf.columns:
-                    _scan_sigma = sigma_per_min_from_returns(_vf["ret_1m"].tolist(), 15)
+                if "ret_1m" in _vf.columns:
+                    _scan_sigma = calibrated_sigma_per_min(_vf["ret_1m"].tolist())
+                if _scan_sigma is None:
+                    try:
+                        _sv = _vf.iloc[-1].get("volatility_15m")
+                        _scan_sigma = float(_sv) * BTC15M_VOL_SCALE if _sv and float(_sv) > 0 else None
+                    except Exception:
+                        _scan_sigma = None
         last_ticker = None
         last_remaining = 0
         last_ml_action = "no_signal"

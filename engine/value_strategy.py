@@ -17,6 +17,13 @@ from engine.fees import multiplier_for_family
 MIN_REMAINING_S = 120
 MAX_REMAINING_S = 780
 
+# Adaptive edge threshold: required net EV grows with time-to-close because the
+# model is fuzzier early (per-T Brier on 90d real bars: 0.08 at T=2m vs 0.22 at
+# T=13m). required = min_edge_cents + EDGE_SLOPE_CENTS_PER_MIN * minutes.
+# Validated out-of-sample (last 30d): +14.2c/trade vs +9.1c flat at base=2,
+# with lower max drawdown. See scripts/backtest_value_strategy.py sweep.
+EDGE_SLOPE_CENTS_PER_MIN = 0.5
+
 
 @dataclass
 class MarketEval:
@@ -56,12 +63,18 @@ def evaluate_market(
     *,
     now: datetime | None = None,
     min_edge_cents: float = 1.0,
+    edge_slope_per_min: float = EDGE_SLOPE_CENTS_PER_MIN,
     max_entry_cents: int = 95,
     family: str = "btc_15m",
     min_remaining_s: int = MIN_REMAINING_S,
     max_remaining_s: int = MAX_REMAINING_S,
 ) -> MarketEval:
-    """Decide whether (and which side) to value-bet on a single market."""
+    """Decide whether (and which side) to value-bet on a single market.
+
+    ``min_edge_cents`` is the BASE threshold; the effective requirement is
+    ``min_edge_cents + edge_slope_per_min * minutes_to_close`` (pass
+    ``edge_slope_per_min=0`` for the old flat behavior).
+    """
     now = now or datetime.now(timezone.utc)
     close_dt = _parse_close_time(market)
     if close_dt is None:
@@ -83,9 +96,10 @@ def evaluate_market(
     )
     yes_c = _ask_cents(market, "yes")
     no_c = _ask_cents(market, "no")
+    required_edge = min_edge_cents + edge_slope_per_min * minutes
     decision = decide_value_trade(
         fair_p, yes_c, no_c,
-        min_edge_cents=min_edge_cents,
+        min_edge_cents=required_edge,
         multiplier=multiplier_for_family(family),
         max_entry_cents=max_entry_cents,
     )

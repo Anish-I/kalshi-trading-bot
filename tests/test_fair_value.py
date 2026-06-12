@@ -130,3 +130,46 @@ def test_fee_makes_thin_edge_unprofitable():
     # 2c gross edge but taker fee near mid (~2c) wipes it out.
     d = decide_value_trade(fair_p=0.52, yes_ask_cents=50, no_ask_cents=50, min_edge_cents=1.0)
     assert d.side is None
+
+
+# ------------------------- ewma / calibrated sigma ------------------------- #
+
+from engine.fair_value import (  # noqa: E402
+    ewma_sigma_series,
+    ewma_sigma_per_min,
+    calibrated_sigma_per_min,
+    BTC15M_VOL_SCALE,
+)
+
+
+def test_ewma_sigma_constant_returns_recovers_magnitude():
+    rets = [0.001] * 200
+    s = ewma_sigma_per_min(rets)
+    assert s == pytest.approx(0.001, rel=1e-3)
+
+
+def test_ewma_sigma_series_no_lookahead_and_decay():
+    # A single spike then quiet: sigma jumps at the spike and decays after.
+    rets = [0.0005] * 50 + [0.01] + [0.0005] * 50
+    arr = ewma_sigma_series(rets)
+    spike = arr[50]
+    assert spike > arr[49]          # reacts at the spike, not before
+    assert arr[60] < spike          # decays afterwards
+    assert arr[49] == pytest.approx(0.0005, rel=1e-2)
+
+
+def test_ewma_sigma_handles_nans():
+    rets = [float("nan"), 0.001, -0.001, 0.001, -0.001]
+    s = ewma_sigma_per_min(rets)
+    assert s is not None and s > 0
+
+
+def test_calibrated_sigma_applies_scale():
+    rets = [0.001] * 200
+    raw = ewma_sigma_per_min(rets)
+    cal = calibrated_sigma_per_min(rets)
+    assert cal == pytest.approx(raw * BTC15M_VOL_SCALE)
+
+
+def test_ewma_sigma_insufficient_data():
+    assert ewma_sigma_per_min([0.001]) is None

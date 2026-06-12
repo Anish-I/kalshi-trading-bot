@@ -27,8 +27,8 @@ import pandas as pd
 
 from config.settings import settings
 from kalshi.client import KalshiClient
-from engine.fair_value import sigma_per_min_from_returns
-from engine.value_strategy import evaluate_market
+from engine.fair_value import calibrated_sigma_per_min
+from engine.value_strategy import evaluate_market, EDGE_SLOPE_CENTS_PER_MIN
 from engine.pre_trade_gate import PreTradeGate, GateContext
 from engine.gate_risk_adapter import RiskManagerAdapter, FamilyLimitsAdapter
 from engine.ticker_exposure import TickerExposureTracker
@@ -51,8 +51,13 @@ def get_spot(product: str) -> float | None:
         return None
 
 
-def get_sigma_per_min(vol_window: int = 15) -> float | None:
-    """Per-minute log-return vol from the latest 1m bars (BTC collector output)."""
+def get_sigma_per_min() -> float | None:
+    """Calibrated per-minute vol from the latest 1m bars (BTC collector output).
+
+    EWMA estimator + the BTC15M_VOL_SCALE microstructure correction — must stay
+    consistent with scripts/backtest_value_strategy.py, which validates exactly
+    this estimator.
+    """
     bars_dir = Path(settings.DATA_DIR) / "bars_1m"
     if not bars_dir.exists():
         return None
@@ -66,7 +71,7 @@ def get_sigma_per_min(vol_window: int = 15) -> float | None:
             return None
         ret = np.full(close.shape, np.nan)
         ret[1:] = np.log(close[1:] / close[:-1])
-        return sigma_per_min_from_returns(ret.tolist(), window=vol_window)
+        return calibrated_sigma_per_min(ret)
     except Exception:
         return None
 
@@ -127,6 +132,7 @@ def run(args) -> None:
                 ev = evaluate_market(
                     market, spot, sigma, now=now,
                     min_edge_cents=args.min_edge_cents,
+                    edge_slope_per_min=args.edge_slope,
                     max_entry_cents=args.max_entry,
                     family="btc_15m",
                 )
@@ -182,7 +188,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Value-vs-fair 15m crypto trader (sim-first)")
     ap.add_argument("--mode", choices=["sim", "live"], default="sim")
     ap.add_argument("--series", default="KXBTC15M", help="comma-separated series")
-    ap.add_argument("--min-edge-cents", type=float, default=2.0)
+    ap.add_argument("--min-edge-cents", type=float, default=2.0,
+                    help="base edge; effective = base + slope * minutes_to_close")
+    ap.add_argument("--edge-slope", type=float, default=EDGE_SLOPE_CENTS_PER_MIN)
     ap.add_argument("--max-entry", type=int, default=90)
     ap.add_argument("--contracts", type=int, default=1)
     ap.add_argument("--interval", type=float, default=20.0)

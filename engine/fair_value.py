@@ -55,6 +55,56 @@ def extract_strike(market: dict) -> float | None:
     return None
 
 
+# Vol scale calibrated on 90d of real BTCUSDT 1m bars (2026-03-13..2026-06-10),
+# fitted on the first 60d, validated on the last 30d (test Brier 0.1430 -> 0.1417).
+# Scale < 1 because 1m bar-close vol carries microstructure noise (bid-ask
+# bounce) that does not propagate to the 15m settlement; the raw estimator
+# therefore overstates diffusion and makes fair_p underconfident.
+BTC15M_VOL_SCALE = 0.90
+
+# RiskMetrics-style per-minute EWMA decay. Reacts to vol clustering far faster
+# than a flat 15-sample std while staying much less noisy.
+EWMA_LAMBDA = 0.94
+
+
+def ewma_sigma_series(ret_1m: "np.ndarray | list[float]", lam: float = EWMA_LAMBDA) -> np.ndarray:
+    """Vectorized zero-mean EWMA volatility over a 1m log-return series.
+
+    Returns an array aligned with ``ret_1m``: element i is the per-minute sigma
+    using information up to and including return i (no lookahead). NaN returns
+    contribute nothing (variance carries through). Drift is not subtracted —
+    over 1 minute it is negligible and estimating it from 15 samples only adds
+    estimator variance.
+    """
+    r2 = np.asarray(ret_1m, dtype=float) ** 2
+    out = np.full(r2.shape, np.nan)
+    v = None
+    for i, x in enumerate(r2):
+        if np.isnan(x):
+            if v is not None:
+                out[i] = math.sqrt(v)
+            continue
+        v = x if v is None else lam * v + (1 - lam) * x
+        out[i] = math.sqrt(v)
+    return out
+
+
+def ewma_sigma_per_min(ret_1m: "np.ndarray | list[float]", lam: float = EWMA_LAMBDA) -> float | None:
+    """Latest per-minute EWMA sigma from a 1m log-return series (live helper)."""
+    arr = np.asarray([r for r in ret_1m if r is not None and not np.isnan(r)], dtype=float)
+    if arr.size < 2:
+        return None
+    sigma = float(ewma_sigma_series(arr, lam)[-1])
+    return sigma if sigma > 0 else None
+
+
+def calibrated_sigma_per_min(ret_1m: "np.ndarray | list[float]", *, vol_scale: float = BTC15M_VOL_SCALE) -> float | None:
+    """EWMA sigma with the empirically calibrated scale applied — the estimator
+    the value model should use for BTC/ETH 15m fair pricing."""
+    sigma = ewma_sigma_per_min(ret_1m)
+    return sigma * vol_scale if sigma is not None else None
+
+
 def sigma_per_min_from_returns(ret_1m: "np.ndarray | list[float]", window: int = 15) -> float | None:
     """Per-minute log-return volatility = std of the last ``window`` 1m returns.
 

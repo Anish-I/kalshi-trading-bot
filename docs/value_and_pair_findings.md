@@ -85,6 +85,38 @@ close, `σ` = per-minute log-return vol from 1m bars. Take YES if
   box to get the real-data Brier), `scripts/crypto_value_trader.py` (sim-first;
   every order funnels through the Phase-1 gate + per-ticker cap).
 
+## 2026-06-11 — model fixes + adaptive strategy (validated on 90d real bars)
+
+Backtest on 90d of real BTCUSDT 1m bars (Binance, 2026-03-13..06-10; 103,680
+samples) surfaced three discrepancies that were depressing the numbers:
+
+1. **T off-by-one (backtest)**: deciding at the close of bar `elapsed` means the
+   price is at minute `elapsed+1`, so T = 14−elapsed, not 15−elapsed. Worst in
+   the final minutes where the edge lives.
+2. **Strike off-by-one (backtest)**: the market strike is the window OPEN
+   (minute 0) = the first bar's `open`, not its close (minute 1).
+3. **Vol estimator**: trailing 15-sample std is noisy and lags vol clustering;
+   and raw 1m bar vol carries microstructure noise that doesn't propagate to
+   settlement, making fair_p underconfident. → EWMA (λ=0.94) ×
+   `BTC15M_VOL_SCALE = 0.90` (fitted on first 60d, validated on last 30d).
+
+Result on identical decision points (true T = 13..2): **Brier 0.1641 → 0.1564,
+directional accuracy 0.752 → 0.763**, reliability on the diagonal in every
+decile. The live estimator (`calibrated_sigma_per_min`) now matches the
+backtest exactly.
+
+**Adaptive edge threshold** (the strategy improvement): per-T Brier runs 0.08
+(T=2m) to 0.22 (T=13m), so a flat min-edge over-trades the fuzzy early window.
+`required = base + 0.5c × minutes_to_close` (engine/value_strategy.py,
+default-on). Out-of-sample (last 30d, one-entry-per-window replay, 2c spread,
+1m-stale book): **+13.5c/trade vs +9.1c flat, win 65%, max drawdown ~5–6$**.
+
+The old per-sample PnL sim books up to 12 trades/window — impossible live under
+the per-ticker cap. Use `simulate_one_trade_per_window` ("HONEST replay" in the
+report) for sizing expectations: ~93 windows/day traded, lag=1m conservative
+assumption → ~+$12/day at 1 contract. Efficient-book sanity (lag=0) finds zero
+trades — the strategy does not hallucinate edge.
+
 ## Validate-before-live checklist
 
 1. `python -m scripts.backtest_value_strategy --bars` on Windows → confirm real
